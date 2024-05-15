@@ -70,7 +70,3 @@ summary(out)
 #Posterior predictive check
 ppc.out <- ppcOcc(out, fit.stat = 'freeman-tukey', group = 1)
 summary(ppc.out)
-
-# Posterior predictive check
-ppc.out <- ppcOcc(out, fit.stat = 'freeman-tukey', group = 1)
-summary(ppc.out)
