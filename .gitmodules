@@ -1,0 +1,3 @@
+[submodule "data/computo-deeplearning-occupany-lynx"]
+	path = data/computo-deeplearning-occupany-lynx
+	url = https://github.com/oliviergimenez/computo-deeplearning-occupany-lynx
