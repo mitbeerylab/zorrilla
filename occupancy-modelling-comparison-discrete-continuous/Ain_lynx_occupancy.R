@@ -106,7 +106,9 @@ if (!file.exists("./data/metadata_Ain.RData")) {
 
 # Load data from Ain
 # load('./data/metadata_Ain.RData')
-load('./data/metadata_Ain_thres_0.5.RData')
+# load('./data/metadata_Ain_thres_0.5.RData')
+# load('./data/metadata_iwildcam_2022_thres_0.001.RData')
+load('./data/metadata_iwildcam_2022_tmp_v3.RData')
 allpic <- allfiles %>%
   mutate(Keywords = as.character(observed)) %>% # pick manual tags
   mutate(DateTime = ymd_hms(str_replace(DateTimeOriginal, "2019:02:29", "2019:03:01"))) %>%
@@ -262,6 +264,9 @@ LynxPic %>%
 # Number of sites
 NbSites = length(allsites$SiteID)
 
+print("Number of sites:")
+print(NbSites)
+
 # List of the detection times
 # format: detection_times[[site i]][[deployment j]] -> vector of detection times
 # Because we only have one deployment per site, the format is:
@@ -286,13 +291,13 @@ for (i in 1:NbSites) {
   i_siteID = names(detection_times)[i]
   
   # Date and time of the beginning and end of the deployment
-  i_BeginTime = allsites %>% filter(SiteID == i_siteID) %>% pull(FirstPic)
-  i_EndTime = allsites %>% filter(SiteID == i_siteID) %>% pull(LastPic)
+  i_BeginTime = allsites %>% filter(SiteID == i_siteID) %>% dplyr::pull(FirstPic)
+  i_EndTime = allsites %>% filter(SiteID == i_siteID) %>% dplyr::pull(LastPic)
   
   # Date and time of detections
   i_DetecDateTime = sort(LynxPic %>%
          filter(SiteID == i_siteID) %>%
-         pull(DateTime))
+         dplyr::pull(DateTime))
   
   # Days between the beginning of the deployment and each detection event
   i_DetecTimeDays = as.numeric(
@@ -353,6 +358,7 @@ SiteID_2_SiteIDNew = left_join(
 
 
 ## ----class.source = 'fold-hide'-----------------------------------------------
+## tryCatch({
 LynxDetecHistory_continuous = ggplot(data = (
   allsites %>%
     left_join(LynxPic, by = "SiteID") %>%
@@ -381,12 +387,14 @@ aes(x = DateTime, y = SiteIDNew)) +
     legend.position = "bottom"
   )
 print(LynxDetecHistory_continuous)
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 # Export
 if (!dir.exists('./output/')) {
   dir.create('./output/')
 }
+## tryCatch({
 ggsave(
   "./output/lynx_detection_history_continuous.pdf",
   plot = (
@@ -409,6 +417,7 @@ print(
     theme(plot.title = element_blank())
 )
 dev.off()
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-hide'-----------------------------------------------
@@ -456,7 +465,7 @@ DayCountMatrix <- DayLongDF %>%
               values_from = "NbDetec") %>% 
   column_to_rownames("SiteID")
 
-
+## tryCatch({
 LynxDetecHistory_day = ggplot() +
   geom_tile(
     data = DayLongDF,
@@ -512,6 +521,7 @@ LynxDetecHistory_day = ggplot() +
     legend.position = "bottom"
   )
 print(LynxDetecHistory_day)
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 
@@ -574,7 +584,7 @@ WeekCountMatrix <- WeekLongDF %>%
               values_from = "NbDetec") %>% 
   column_to_rownames("SiteID")
 
-
+## tryCatch({
 LynxDetecHistory_week = ggplot() +
   geom_tile(
     data = WeekLongDF,
@@ -630,6 +640,7 @@ LynxDetecHistory_week = ggplot() +
     legend.position = "bottom"
   )
 print(LynxDetecHistory_week)
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 
@@ -692,7 +703,7 @@ MonthCountMatrix <- MonthLongDF %>%
               values_from = "NbDetec") %>% 
   column_to_rownames("SiteID")
 
-
+## tryCatch({
 LynxDetecHistory_month = ggplot() +
   geom_tile(
     data = MonthLongDF,
@@ -748,6 +759,7 @@ LynxDetecHistory_month = ggplot() +
     legend.position = "bottom"
   )
 print(LynxDetecHistory_month)
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## -----------------------------------------------------------------------------
@@ -775,6 +787,7 @@ MonthSessionsLabelsTrimester[
   sort(c(seq(from = 2, to = length(MonthSessionsLabels), by = 3),
          seq(from = 3, to = length(MonthSessionsLabels), by = 3)))] <- ""
 
+## tryCatch({
 gg_Month = ggplot() +
   geom_tile(
     data = (
@@ -842,6 +855,7 @@ gg_Month = ggplot() +
     legend.title = element_text(size = 12),
     legend.title.align = 0.5
   )
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 # Week ----
 WeekSessionsLabelsTrimester = format(WeekSessions, "%b %y")
@@ -850,6 +864,7 @@ WeekSessionsLabelsTrimester[
   !WeekSessionsLabelsTrimester %in% MonthSessionsLabelsTrimester
   ] = ""
 
+## tryCatch({
 gg_Week = ggplot() +
     geom_tile(
     data = (
@@ -901,8 +916,10 @@ gg_Week = ggplot() +
     panel.grid.major.x = element_blank(),
     legend.position = "bottom"
   )
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 # Day ----
+## tryCatch({
 DaySessionsLabelsTrimester = format(DaySessions, "%b %y")
 DaySessionsLabelsTrimester[duplicated(DaySessionsLabelsTrimester)] = ""
 DaySessionsLabelsTrimester[
@@ -961,9 +978,10 @@ gg_Day = ggplot() +
     panel.grid.major.x = element_blank(),
     legend.position = "bottom"
   )
-
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 # Discrete ----
+## tryCatch({
 gg_Discrete = ggarrange(
   gg_Month + theme(axis.text.x = element_blank()),
   gg_Week + theme(axis.text.x = element_blank()),
@@ -993,6 +1011,7 @@ jpeg(
 )
 print(gg_Discrete)
 dev.off()
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## -----------------------------------------------------------------------------
@@ -1003,7 +1022,7 @@ ModelComparisonDF <- data.frame()
 o = 10
 o1 = 5
 print(MonthCountMatrix)
-umf <- unmarkedFrameOccuFP(y = (as.matrix(MonthCountMatrix) > 1) * 1, type=c((o-o1),o1,0))
+umf <- unmarkedFrameOccu(y = (as.matrix(MonthCountMatrix) > 1) * 1)
 summary(umf)
 print(umf)
 
@@ -1020,15 +1039,14 @@ print(umf)
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
-print(umf)
-MonthOccuMod <- occuFP(detformula =  ~ 1, stateformula=~1, FPformula=~1,
+MonthOccuMod <- occu(formula =  ~ 1 ~ 1,
      data = umf,
      method = "Nelder-Mead",
-     starts = c(qlogis(psi_init), qlogis(p_init), 0.5)
+     starts = c(qlogis(psi_init), qlogis(p_init))
 )
 aftertime = Sys.time()
-print(MonthOccuMod)
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1066,6 +1084,76 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "p_CI50lower" = plogis(confint(MonthOccuMod, type = 'det', method = 'normal', level = 0.50))[1],
   "p_CI50upper" = plogis(confint(MonthOccuMod, type = 'det', method = 'normal', level = 0.50))[2]
 ))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
+
+## ----class.source = 'fold-show'-----------------------------------------------
+o = 10
+o1 = 5
+print(MonthCountMatrix)
+y <- (as.matrix(MonthCountMatrix) > 1) * 1
+umf <- unmarkedFrameOccuFP(y=y, type=c(0,dim(y)[2],0))
+summary(umf)
+print(umf)
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(p_init <- mean(
+  getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, 
+  na.rm = T
+))
+
+beforetime = Sys.time()
+MonthOccuModFP <- occuFP(detformula =  ~ 1, stateformula=~1, FPformula=~1,
+     data = umf,
+     method = "Nelder-Mead",
+     starts = c(qlogis(psi_init), qlogis(p_init), 0.5)
+)
+aftertime = Sys.time()
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+# Estimates
+backTransform(MonthOccuModFP, type = "state")
+backTransform(MonthOccuModFP, type = "det")
+
+# 95% Confidence intervals
+plogis(confint(MonthOccuModFP, type = 'state', method = 'normal'))
+plogis(confint(MonthOccuModFP, type = 'det', method = 'normal'))
+
+# 50% Confidence intervals
+plogis(confint(MonthOccuModFP, type = 'state', method = 'normal', level = 0.50))
+plogis(confint(MonthOccuModFP, type = 'det', method = 'normal', level = 0.50))
+
+
+## -----------------------------------------------------------------------------
+ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
+  "Model" = "BP_FP",
+  "Discretisation" = "Month",
+  # psi
+  "psi_TransformedPointEstimate" = unname(coef(MonthOccuModFP)["psi(Int)"]),
+  "psi_TransformedSE" = unname(SE(MonthOccuModFP)["psi(Int)"]),
+  "psi_PointEstimate" = backTransform(MonthOccuModFP, type = "state")@estimate,
+  "psi_CI95lower" = plogis(confint(MonthOccuModFP, type = 'state', method = 'normal'))[1],
+  "psi_CI95upper" = plogis(confint(MonthOccuModFP, type = 'state', method = 'normal'))[2],
+  "psi_CI50lower" = plogis(confint(MonthOccuModFP, type = 'state', method = 'normal', level = 0.50))[1],
+  "psi_CI50upper" = plogis(confint(MonthOccuModFP, type = 'state', method = 'normal', level = 0.50))[2],
+  # p
+  "p_TransformedPointEstimate" = unname(coef(MonthOccuModFP)["p(Int)"]),
+  "p_TransformedSE" = unname(SE(MonthOccuModFP)["p(Int)"]),
+  "p_PointEstimate" = backTransform(MonthOccuModFP, type = "det")@estimate,
+  "p_CI95lower" = plogis(confint(MonthOccuModFP, type = 'det', method = 'normal'))[1],
+  "p_CI95upper" = plogis(confint(MonthOccuModFP, type = 'det', method = 'normal'))[2],
+  "p_CI50lower" = plogis(confint(MonthOccuModFP, type = 'det', method = 'normal', level = 0.50))[1],
+  "p_CI50upper" = plogis(confint(MonthOccuModFP, type = 'det', method = 'normal', level = 0.50))[2]
+))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1086,6 +1174,7 @@ summary(umf)
 
 ## ----class.source = 'fold-show'-----------------------------------------------
 beforetime = Sys.time()
+## tryCatch({
 WeekOccuMod <- occu(formula =  ~ 1 ~ 1,
      data = umf,
      method = "Nelder-Mead",
@@ -1130,6 +1219,74 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "p_CI50lower" = plogis(confint(WeekOccuMod, type = 'det', method = 'normal', level = 0.50))[1],
   "p_CI50upper" = plogis(confint(WeekOccuMod, type = 'det', method = 'normal', level = 0.50))[2]
 ))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
+
+## ----class.source = 'fold-show'-----------------------------------------------
+y <- (as.matrix(WeekCountMatrix) > 1) * 1
+umf <- unmarkedFrameOccuFP(y=y, type=c(0,dim(y)[2],0))
+summary(umf)
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(p_init <- mean(
+  getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, 
+  na.rm = T
+))
+
+beforetime = Sys.time()
+WeekOccuModFP <- occuFP(detformula =  ~ 1, stateformula=~1, FPformula=~1,
+     data = umf,
+     method = "Nelder-Mead",
+     starts = c(qlogis(psi_init), qlogis(p_init), 0.5)
+)
+aftertime = Sys.time()
+print(WeekOccuModFP)
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+# Estimates
+backTransform(WeekOccuModFP, type = "state")
+backTransform(WeekOccuModFP, type = "det")
+
+# 95% Confidence intervals
+plogis(confint(WeekOccuModFP, type = 'state', method = 'normal'))
+plogis(confint(WeekOccuModFP, type = 'det', method = 'normal'))
+
+# 50% Confidence intervals
+plogis(confint(WeekOccuModFP, type = 'state', method = 'normal', level = 0.50))
+plogis(confint(WeekOccuModFP, type = 'det', method = 'normal', level = 0.50))
+
+
+## -----------------------------------------------------------------------------
+ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
+  "Model" = "BP_FP",
+  "Discretisation" = "Week",
+  # psi
+  "psi_TransformedPointEstimate" = unname(coef(WeekOccuModFP)["psi(Int)"]),
+  "psi_TransformedSE" = unname(SE(WeekOccuModFP)["psi(Int)"]),
+  "psi_PointEstimate" = backTransform(WeekOccuModFP, type = "state")@estimate,
+  "psi_CI95lower" = plogis(confint(WeekOccuModFP, type = 'state', method = 'normal'))[1],
+  "psi_CI95upper" = plogis(confint(WeekOccuModFP, type = 'state', method = 'normal'))[2],
+  "psi_CI50lower" = plogis(confint(WeekOccuModFP, type = 'state', method = 'normal', level = 0.50))[1],
+  "psi_CI50upper" = plogis(confint(WeekOccuModFP, type = 'state', method = 'normal', level = 0.50))[2],
+  # p
+  "p_TransformedPointEstimate" = unname(coef(WeekOccuModFP)["p(Int)"]),
+  "p_TransformedSE" = unname(SE(WeekOccuModFP)["p(Int)"]),
+  "p_PointEstimate" = backTransform(WeekOccuModFP, type = "det")@estimate,
+  "p_CI95lower" = plogis(confint(WeekOccuModFP, type = 'det', method = 'normal'))[1],
+  "p_CI95upper" = plogis(confint(WeekOccuModFP, type = 'det', method = 'normal'))[2],
+  "p_CI50lower" = plogis(confint(WeekOccuModFP, type = 'det', method = 'normal', level = 0.50))[1],
+  "p_CI50upper" = plogis(confint(WeekOccuModFP, type = 'det', method = 'normal', level = 0.50))[2]
+))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1149,6 +1306,7 @@ summary(umf)
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
 DayOccuMod <- occu(formula =  ~ 1 ~ 1,
      data = umf,
@@ -1194,6 +1352,72 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "p_CI50lower" = plogis(confint(DayOccuMod, type = 'det', method = 'normal', level = 0.50))[1],
   "p_CI50upper" = plogis(confint(DayOccuMod, type = 'det', method = 'normal', level = 0.50))[2]
 ))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+y <- (as.matrix(DayCountMatrix) > 1) * 1
+umf <- unmarkedFrameOccuFP(y=y, type=c(0,dim(y)[2],0))
+summary(umf)
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+(p_init <- mean(
+  getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, 
+  na.rm = T
+))
+
+beforetime = Sys.time()
+## tryCatch({
+DayOccuModFP <- occuFP(detformula =  ~ 1, stateformula=~1, FPformula=~1,
+     data = umf,
+     method = "Nelder-Mead",
+     starts = c(qlogis(psi_init), qlogis(p_init), 0.5)
+)
+aftertime = Sys.time()
+print(DayOccuModFP)
+
+
+## ----class.source = 'fold-show'-----------------------------------------------
+# Estimates
+backTransform(DayOccuModFP, type = "state")
+backTransform(DayOccuModFP, type = "det")
+
+# 95% Confidence intervals
+plogis(confint(DayOccuModFP, type = 'state', method = 'normal'))
+plogis(confint(DayOccuModFP, type = 'det', method = 'normal'))
+
+# 50% Confidence intervals
+plogis(confint(DayOccuModFP, type = 'state', method = 'normal', level = 0.50))
+plogis(confint(DayOccuModFP, type = 'det', method = 'normal', level = 0.50))
+
+
+## -----------------------------------------------------------------------------
+ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
+  "Model" = "BP_FP",
+  "Discretisation" = "Day",
+  # psi
+  "psi_TransformedPointEstimate" = unname(coef(DayOccuModFP)["psi(Int)"]),
+  "psi_TransformedSE" = unname(SE(DayOccuModFP)["psi(Int)"]),
+  "psi_PointEstimate" = backTransform(DayOccuModFP, type = "state")@estimate,
+  "psi_CI95lower" = plogis(confint(DayOccuModFP, type = 'state', method = 'normal'))[1],
+  "psi_CI95upper" = plogis(confint(DayOccuModFP, type = 'state', method = 'normal'))[2],
+  "psi_CI50lower" = plogis(confint(DayOccuModFP, type = 'state', method = 'normal', level = 0.50))[1],
+  "psi_CI50upper" = plogis(confint(DayOccuModFP, type = 'state', method = 'normal', level = 0.50))[2],
+  # p
+  "p_TransformedPointEstimate" = unname(coef(DayOccuModFP)["p(Int)"]),
+  "p_TransformedSE" = unname(SE(DayOccuModFP)["p(Int)"]),
+  "p_PointEstimate" = backTransform(DayOccuModFP, type = "det")@estimate,
+  "p_CI95lower" = plogis(confint(DayOccuModFP, type = 'det', method = 'normal'))[1],
+  "p_CI95upper" = plogis(confint(DayOccuModFP, type = 'det', method = 'normal'))[2],
+  "p_CI50lower" = plogis(confint(DayOccuModFP, type = 'det', method = 'normal', level = 0.50))[1],
+  "p_CI50upper" = plogis(confint(DayOccuModFP, type = 'det', method = 'normal', level = 0.50))[2]
+))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1219,7 +1443,11 @@ summary(umf)
                      na.rm = T))
 
 
+print(psi_init)
+print(lambda_init)
+
 ## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
 MonthOccuCOPMod <- occuCOP(
   data = umf,
@@ -1269,6 +1497,8 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "lambda_CI50upper" = plogis(confint(MonthOccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[2]
 ))
 
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
 
 ## ----class.source = 'fold-show'-----------------------------------------------
 umf = unmarkedFrameOccuCOP(
@@ -1293,6 +1523,7 @@ summary(umf)
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
 WeekOccuCOPMod <- occuCOP(
   data = umf,
@@ -1341,9 +1572,11 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "lambda_CI50lower" = plogis(confint(WeekOccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[1],
   "lambda_CI50upper" = plogis(confint(WeekOccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[2]
 ))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
+## tryCatch({
 umf = unmarkedFrameOccuCOP(
   y = as.matrix(DayCountMatrix),
   L = matrix(
@@ -1414,6 +1647,7 @@ ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
   "lambda_CI50lower" = plogis(confint(DayOccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[1],
   "lambda_CI50upper" = plogis(confint(DayOccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[2]
 ))
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1433,6 +1667,7 @@ MonitoringDurationPerSite <- unlist(list_T_ij)
 
 
 ## ----fit_PP_all, class.source = 'fold-show'-----------------------------------
+## tryCatch({
 beforetime = Sys.time()
 fitted_PP <- optim(
   # Initial parameters
@@ -1498,6 +1733,7 @@ ModelComparisonDF <- bind_rows(
   ModelComparisonDF,
   resDF
 )
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## ----class.source = 'fold-show'-----------------------------------------------
@@ -1522,6 +1758,7 @@ mu_21_init = 1
 
 
 ## ----fit_IPP_all--------------------------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
 fitted_IPP <- optim(
   # Initial parameters
@@ -1605,6 +1842,7 @@ ModelComparisonDF <- bind_rows(
   ModelComparisonDF,
   resDF
 )
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
 ## -----------------------------------------------------------------------------
@@ -1612,6 +1850,7 @@ lambda1_init = 0.01
 
 
 ## ----fit_2MMPP_all------------------------------------------------------------
+## tryCatch({
 beforetime = Sys.time()
 fitted_2MMPP <- optim(
   # Initial parameters
@@ -1704,7 +1943,11 @@ ModelComparisonDF <- bind_rows(
   ModelComparisonDF,
   resDF
 )
+## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
+
+# # TODO: remove?
+# quit()
 
 ## ----ComparisonResultDF-------------------------------------------------------
 PublicationDF <- ModelComparisonDF %>% 
@@ -1869,15 +2112,18 @@ plotPsiContinuous = ModelComparisonDF %>%
     axis.title.y = element_blank()
   )
 
-plotPsi = ggpubr::ggarrange(
-  plotPsiDiscrete,
-  plotPsiContinuous,
-  common.legend = TRUE,
-  legend = "bottom",
-  ncol = 2,
-  widths = c(1, 0.7)
-) +
-  theme(plot.background = element_rect(fill = "white"))
+# below doesn't work because `plotPsiContinuous` is empty, so replace with just `plotPsiDiscrete`
+# plotPsi = ggpubr::ggarrange(
+#   plotPsiDiscrete,
+#   plotPsiContinuous,
+#   common.legend = TRUE,
+#   legend = "bottom",
+#   ncol = 2,
+#   widths = c(1, 0.7)
+# ) +
+#   theme(plot.background = element_rect(fill = "white"))
+plotPsi = plotPsiDiscrete
+
 print(plotPsi)
 
 # Export

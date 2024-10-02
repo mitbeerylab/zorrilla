@@ -34,7 +34,7 @@ df = []
 for image in tqdm(data["images"]):
     gt_category_ids = image_id_to_category_id[image["id"]]
     image_path = raw_image_dir / image["file_name"]
-    predictions = classifier.predict(str(image_path))
+    predictions = classifier.predict(str(image_path), return_logits=True)
     row = {
         "split": split,
         **image,
@@ -43,6 +43,7 @@ for image in tqdm(data["images"]):
     }
     for prediction in predictions:
         row["pred_" + map_species_name_to_column(prediction["classification"])] = prediction["score"]
+        row["logit_" + map_species_name_to_column(prediction["classification"])] = prediction["logit"]
     df.append(row)
 
-pd.DataFrame(df).to_csv(Path(__file__).parent / ".." / "data" / "iwildcam_2022_bioclip_inference.csv")
+pd.DataFrame(df).to_csv(Path(__file__).parent / ".." / "data" / "iwildcam_2022_bioclip_inference_logits.csv")

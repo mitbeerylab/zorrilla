@@ -14,7 +14,7 @@ rpy2.robjects.numpy2ri.activate()
 rpy2.robjects.pandas2ri.activate()
 
 
-from utils import rnamedlist
+from rutils import rnamedlist
 
 
 utils = importr("utils")
