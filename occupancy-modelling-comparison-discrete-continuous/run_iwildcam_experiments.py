@@ -147,10 +147,9 @@ def main():
             ax2.set_ylabel("Precision")
             fig.suptitle(target_species)
             os.makedirs("figures/scores", exist_ok=True)
-            plt.savefig(f"figures/scores/{target_species}.png", bbox_inches="tight")
+            plt.savefig(f"figures/scores/{target_species}.pdf", bbox_inches="tight", transparent=True)
 
         for target_species in target_species_list:
-            # for threshold in np.linspace(dfn[f"{pred_prefix}{target_species}"].min(), dfn[f"{pred_prefix}{target_species}"].max(), 10)[::-1]:
             target_species_scores = dfn[f"{pred_prefix}{target_species}"]
             valid_mask = ~np.isnan(target_species_scores)
             if np.sum(valid_mask) < n_sweep_steps:
@@ -226,47 +225,6 @@ def main():
                 
                 else:
                     print("Failed to get model comparison df")
-
-                # for model in [
-                #     "MonthOccuMod",
-                #     "WeekOccuMod",
-                #     "DayOccuMod",
-                # ]:
-                #     if success:
-                #         try:
-                #             aic = robjects.r(f"attr({model}, 'AIC')")[0]
-                #         except:
-                #             aic = None
-                #         try:
-                #             occ_est = robjects.r(f"attr({model}, 'opt')")[0][0]
-                #         except:
-                #             occ_est = None
-                #         try:
-                #             det_est = robjects.r(f"attr({model}, 'opt')")[0][1]
-                #         except:
-                #             det_est = None
-                #         try:
-                #             fpo_est = robjects.r(f"attr({model}, 'opt')")[0][2]
-                #         except:
-                #             fpo_est = None
-                #     else:
-                #         aic = None
-                #         occ_est = None
-                #         det_est = None
-                #         fpo_est = None
-
-                #     output_table.append({
-                #         "species": target_species,
-                #         "threshold": threshold,
-                #         "precision": precision,
-                #         "recall": recall,
-                #         "f1": f1,
-                #         "model": model,
-                #         "aic": aic,
-                #         "occ_est": occ_est,
-                #         "det_est": det_est,
-                #         "fpo_est": fpo_est,
-                #     })
 
     finally:
         # os.unlink(output_path)
