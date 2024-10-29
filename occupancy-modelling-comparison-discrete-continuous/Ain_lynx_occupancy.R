@@ -578,6 +578,9 @@ WeekLongDF <- expand.grid(
   by = c("SiteID", "WeekSession")) %>% 
   mutate(NbDetec = ifelse(FullyMonitored, ifelse(is.na(n), 0, n), NA))
 
+# print(WeekLongDF, n=40, width=Inf)
+# quit()
+
 WeekCountMatrix <- WeekLongDF %>% 
   select(SiteID, WeekSession, NbDetec) %>% 
   pivot_wider(names_from = "WeekSession", 
@@ -1014,6 +1017,11 @@ dev.off()
 ## }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
 
 
+# print(MonthLongDF, n=40, width=Inf)
+# print(MonthCountMatrix)
+# quit()
+
+
 ## -----------------------------------------------------------------------------
 ModelComparisonDF <- data.frame()
 
@@ -1431,6 +1439,8 @@ umf = unmarkedFrameOccuCOP(
     dimnames = dimnames(MonthCountMatrix)
   )
 )
+print(umf)
+quit()
 summary(umf)
 
 

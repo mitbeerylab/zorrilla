@@ -1,4 +1,3 @@
-# %%
 import os
 from collections import Counter
 # import rdata
@@ -16,40 +15,47 @@ from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 import rpy2
 import rpy2.robjects as robjects
+import rpy2.robjects as ro
 from rpy2.robjects.packages import importr
 import rpy2.robjects.numpy2ri
 import rpy2.robjects.pandas2ri
 rpy2.robjects.numpy2ri.activate()
 rpy2.robjects.pandas2ri.activate()
 from multiprocessing import Process, Queue, Event
+import json
+from functools import cache
 
-# %%
 
-from astropy.time import TimeDelta
-x = list(range(48))
-y = []
-loc = coord.EarthLocation(lon=50 * u.deg, lat=5 * u.deg)
-for i in x:
-    time = Time('1999-01-01T00:00:00.123456789') + TimeDelta(i * 3600, format="sec")
-    altaz = coord.AltAz(location=loc, obstime=time)
-    sun = coord.get_sun(time)
-    sun.transform_to(altaz).alt
-    y.append(float(sun.transform_to(altaz).alt / u.deg))
+tf = TimezoneFinder()
+timezone_at = cache(tf.timezone_at)
 
-import matplotlib.pyplot as plt
-plt.plot(x, y)
 
-# %%
+py2r = ro.conversion.get_conversion().py2rpy
+r2py = ro.conversion.get_conversion().rpy2py
+
+
+# from astropy.time import TimeDelta
+# x = list(range(48))
+# y = []
+# loc = coord.EarthLocation(lon=50 * u.deg, lat=5 * u.deg)
+# for i in x:
+#     time = Time('1999-01-01T00:00:00.123456789') + TimeDelta(i * 3600, format="sec")
+#     altaz = coord.AltAz(location=loc, obstime=time)
+#     s = coord.get_sun(time)
+#     s.transform_to(altaz).alt
+#     y.append(float(s.transform_to(altaz).alt / u.deg))
+
+# import matplotlib.pyplot as plt
+# plt.plot(x, y)
+
 def get_thresholds(target_species_scores, n_sweep_steps):
     valid_mask = np.isfinite(target_species_scores)
     return np.linspace(np.min(target_species_scores[valid_mask]), np.max(target_species_scores[valid_mask]), n_sweep_steps)
     # return np.percentile(target_species_scores[valid_mask], np.linspace(0, 100, n_sweep_steps))
 
-# %%
 target_species_out = "lynx"
 output_table_path = os.path.join("data", "iwildcam_2022_results_v6.csv")
 
-tf = TimezoneFinder()
 
 
 os.chdir(os.path.dirname(__file__))  # TODO: remove
@@ -62,17 +68,32 @@ dfn["datetime"] = pd.to_datetime(dfn["datetime"])
 print("Removing", dfn["datetime"].isna().sum(), "missing datetime values")
 dfn = dfn[~dfn["datetime"].isna()]
 
+dfn = dfn[np.isfinite(dfn["latitude"]) & np.isfinite(dfn["longitude"])]  # TODO: keep
+
 df_dem = pd.read_csv(os.path.join("..", "data", "iwildcam_2022_dem.csv"))
 df_landcover = pd.read_csv(os.path.join("..", "data", "iwildcam_2022_landcover.csv"))
+df_region_labels = pd.read_csv(os.path.join("..", "data", "iwildcam_2022_region_labels.csv"))
+covs = df_dem.merge(df_landcover, on="name", suffixes=("_dem", "_landcover")).merge(df_region_labels, left_on="name", right_on="location", suffixes=("", "_region_labels"))
 
-print(f"number of sites before: {dfn['location'].nunique()}")
+# dfn = dfn.merge(df_dem, left_on="location", right_on="name", how="left", suffixes=("", "_dem")).merge(df_landcover, left_on="location", right_on="name", how="left", suffixes=("", "_landcover"))
 
-dfn = dfn.merge(df_dem, left_on="location", right_on="name", how="left", suffixes=("", "_dem")).merge(df_landcover, left_on="location", right_on="name", how="left", suffixes=("", "_landcover"))
+# localize datetime timezones
+datetimes_new = []
+for _, row in dfn.iterrows():
+    tzinfo = ZoneInfo(timezone_at(lng=row["longitude"], lat=row["latitude"]))
+    datetimes_new.append(row["datetime"].tz_localize(tzinfo))
+dfn["datetime_local"] = datetimes_new
 
-# # compute time since sunrise/sunset
-# for _, row in dfn:
-#     loc = LocationInfo(latitude=row["latitude"], longitude=row["longitude"])
-#     s = sun(loc.observer, date=row["datetime"])
+# compute time since sunrise/sunset
+astral_times = []
+for _, row in dfn.iterrows():
+    loc = LocationInfo(latitude=row["latitude"], longitude=row["longitude"])
+    tzinfo = ZoneInfo(timezone_at(lng=row["longitude"], lat=row["latitude"]))
+    s = sun.sun(loc.observer, date=row["datetime_local"], tzinfo=tzinfo)
+    astral_times.append(s)
+for k in astral_times[0].keys():
+    assert k not in dfn.columns
+    dfn[k] = [e[k] for e in astral_times]
 
 
 # TODO: re-enable
@@ -94,7 +115,7 @@ dfn = dfn.merge(df_dem, left_on="location", right_on="name", how="left", suffixe
 
 # dfn["sun_alt"] = alt
 
-print(f"number of sites: {dfn['location'].nunique()}")
+print(f"number of sites overall: {dfn['location'].nunique()}")
 # print(f"number of observations: {Counter(dfo['observed'].tolist())}")
 
 pred_prefix = "logit_"  # "pred_" or "logit_"
@@ -120,323 +141,261 @@ target_species_list = [e.replace(" ", "_") for e in [
 for target_species in target_species_list:
     scores = dfn[f"{pred_prefix}{target_species}"] = dfn[f"{pred_prefix}{target_species}"].fillna(value=-float("inf"))
 
-best_threshold = {}
-
 # split along sequence IDs
 train_seq, test_seq = train_test_split(dfn["seq_id"].unique(), test_size=0.8, random_state=42)
 df_train, df_test = dfn[dfn["seq_id"].isin(train_seq)], dfn[dfn["seq_id"].isin(test_seq)]
 
-for target_species in target_species_list:
-    gt = df_train[f"gt_{target_species}"]
-    scores = df_train[f"{pred_prefix}{target_species}"]
-    pos_scores = scores[ df_train[f"gt_{target_species}"]]
-    neg_scores = scores[~df_train[f"gt_{target_species}"]]
-    assert len(pos_scores) >= calibration_min_samples and len(neg_scores) > calibration_min_samples
-    scores_unique = np.sort(np.unique(scores))
-    f1 = []
-    for s in scores_unique:
-        tp = ((scores >= s) &  gt).sum()
-        fp = ((scores >= s) & ~gt).sum()
-        fn = ((scores <  s) &  gt).sum()
-        tn = ((scores <  s) & ~gt).sum()
-        recall = tp / (tp + fn)
-        precision = tp / (tp + fp)
-        if precision + recall > 0:
-            f1_item = (2 * precision * recall) / (precision + recall)
-        else:
-            f1_item = 0
-        f1 += [f1_item]
-    f1 = np.array(f1)
-    assert len(f1[np.isfinite(f1)]) > 0
-    best_score = np.mean(scores_unique[f1 == f1[np.isfinite(f1)].max()])
-    print(f"Best threshold for species '{target_species}' is {best_score:.2f} at f1 of {f1[np.isfinite(f1)].max():.2f}")
-    best_threshold[target_species] = best_score
+if os.path.exists("cache/optimal_thresholds.json"):
+    with open("cache/optimal_thresholds.json") as f:
+        best_threshold = json.load(f)
+        assert set(best_threshold.keys()) == set(target_species_list)
+else:
+    best_threshold = {}
 
-# use only test data to continue
-dfn = df_test
-
-output_table = []
-
-
-available_species = [e.replace(pred_prefix, "") for e in dfn.columns if e.startswith(pred_prefix) and e != f"{pred_prefix}empty"]
-if target_species_list is None:
-    target_species_list = available_species
-
-# for target_species in target_species_list:
-#     fig, (ax1, ax2) = plt.subplots(1, 2, )
-#     target_species_scores = dfn[f"{pred_prefix}{target_species}"]
-#     valid_mask = ~np.isnan(target_species_scores)
-
-#     thresholds = get_thresholds(target_species_scores, n_sweep_steps)
-#     ax1.hist(target_species_scores[valid_mask &  dfn[f"gt_{target_species}"]], bins=20, alpha=0.5, label="True")
-#     ax1.hist(target_species_scores[valid_mask & ~dfn[f"gt_{target_species}"]], bins=20, alpha=0.5, label="False")
-#     ax1.plot(thresholds, [0] * len(thresholds), 'o', label="Thresholds")
-#     ax1.set_yscale("log")
-    
-#     precision = []
-#     recall = []
-#     for threshold in thresholds:
-#         predicted = np.array([target_species_out if row[f"{pred_prefix}{target_species}"] >= threshold else "other" for _, row in dfn.iterrows()])
-#         tp = ((predicted == target_species_out) &  dfn[f"gt_{target_species}"]).sum()
-#         fp = ((predicted == target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
-#         fn = ((predicted != target_species_out) &  dfn[f"gt_{target_species}"]).sum()
-#         tn = ((predicted != target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
-#         r = tp / (tp + fn)
-#         p = tp / (tp + fp)
-#         if np.isfinite([r, p]).all():
-#             recall += [r]
-#             precision += [p]
-
-#     ax2.plot(recall, precision)
-#     ax1.set_xlabel("Logit")
-#     ax1.set_ylabel("Number of Observations")
-#     ax2.set_xlabel("Recall")
-#     ax2.set_ylabel("Precision")
-#     fig.suptitle(target_species)
-#     os.makedirs("figures/scores", exist_ok=True)
-#     plt.savefig(f"figures/scores/{target_species}.pdf", bbox_inches="tight", transparent=True)
-
-# %%
-for target_species in target_species_list:
-    target_species_scores = dfn[f"{pred_prefix}{target_species}"]
-    valid_mask = ~np.isnan(target_species_scores)
-    if np.sum(valid_mask) < n_sweep_steps:
-        print(f"Species '{target_species}' has to few samples, skipping...")
-        continue
-    thresholds = [*get_thresholds(target_species_scores, n_sweep_steps), best_threshold[target_species], float("NaN")]
-    threshold_types = ["sampled"] * (len(thresholds) - 2) + ["calibrated"] + ["gt"]
-    for threshold, threshold_type in zip(thresholds, threshold_types):
-        if threshold_type != "gt":
-            dfn["observed"] = dfn[f"{pred_prefix}{target_species}"] >= threshold
-        else:
-            dfn["observed"] = dfn[f"gt_{target_species}"]
-
-        print(dfn["observed"].sum(), f"positive observations with threshold {threshold}")
-
-
-        tp = ( dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
-        fp = ( dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
-        fn = (~dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
-        tn = (~dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
-
-        recall = tp / (tp + fn)
-        precision = tp / (tp + fp)
-        f1 = (2 * precision * recall) / (precision + recall)
-
-        print(f"{target_species} precision {precision:.2f} recall {recall:.2f} f1 {f1:.2f}")
-
-        
-        for aggregation, pd_freq in [("month", "ME"), ("week", "W"), ("day", "D")]:
-
-            # TODO: implement better way to detect actual deployment times
-
-            dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
-            dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
-            
-            n_sites = dfn["location"].nunique()
-            if aggregation == "month":
-                L = np.tile(dfa.columns.days_in_month.values, (n_sites, 1))
-            elif aggregation == "week":
-                L = np.full((n_sites, len(dfa.columns)), 7)
-            elif aggregation == "day":
-                L = np.full((n_sites, len(dfa.columns)), 1)
+    for target_species in target_species_list:
+        gt = df_train[f"gt_{target_species}"]
+        scores = df_train[f"{pred_prefix}{target_species}"]
+        pos_scores = scores[ df_train[f"gt_{target_species}"]]
+        neg_scores = scores[~df_train[f"gt_{target_species}"]]
+        assert len(pos_scores) >= calibration_min_samples and len(neg_scores) > calibration_min_samples
+        scores_unique = np.sort(np.unique(scores))
+        f1 = []
+        for s in scores_unique:
+            tp = ((scores >= s) &  gt).sum()
+            fp = ((scores >= s) & ~gt).sum()
+            fn = ((scores <  s) &  gt).sum()
+            tn = ((scores <  s) & ~gt).sum()
+            recall = tp / (tp + fn)
+            precision = tp / (tp + fp)
+            if precision + recall > 0:
+                f1_item = (2 * precision * recall) / (precision + recall)
             else:
-                raise ValueError()
+                f1_item = 0
+            f1 += [f1_item]
+        f1 = np.array(f1)
+        assert len(f1[np.isfinite(f1)]) > 0
+        best_score = np.mean(scores_unique[f1 == f1[np.isfinite(f1)].max()])
+        print(f"Best threshold for species '{target_species}' is {best_score:.2f} at f1 of {f1[np.isfinite(f1)].max():.2f}")
+        best_threshold[target_species] = best_score
+    
+    os.makedirs("cache", exist_ok=True)
+    with open("cache/optimal_thresholds.json", "w") as f:
+        json.dump(best_threshold, f)
 
-            site_covs = df_landcover[dfa["location"]][["forest_type", "elevation"]]
+# TODO: re-enable
+# for region_label in sorted(covs["region_label"].unique()):
+for region_labels in [[0, 3, 4]]:
 
-            robjects.globalenv["dfa"] = robjects.conversion.get_conversion().py2rpy(dfa)
-            robjects.globalenv["L"] = robjects.conversion.get_conversion().py2rpy(L)
-            robjects.globalenv["site_covs"] = robjects.conversion.get_conversion().py2rpy(site_covs)
+    # use only test data from region to continue
+    dfn = df_test[df_test["location"].isin(covs[covs["region_label"].isin(region_labels)]["name"].unique())]
 
-            r_scripts = dict(
-                BP=r'''
-                library(unmarked)
-                library(tidyverse)
-                library(lubridate)
+    print(f"number of sites in regions '{region_labels}': {dfn['location'].nunique()}")
 
-                ModelComparisonDF <- data.frame()
+    gt_only = False
+    output_table = []
 
-                umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)
 
-                (psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
-                (p_init <- mean(
-                    getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, 
-                    na.rm = T
-                ))
+    if not os.path.exists("figures/scores"):
+        for target_species in target_species_list:
+            fig, (ax1, ax2) = plt.subplots(1, 2, )
+            target_species_scores = dfn[f"{pred_prefix}{target_species}"]
+            valid_mask = np.isfinite(target_species_scores)
 
-                siteCovs(umf) <- site_covs
+            thresholds = get_thresholds(target_species_scores, n_sweep_steps)
+            ax1.hist(target_species_scores[valid_mask &  dfn[f"gt_{target_species}"]], bins=20, alpha=0.5, label="True")
+            ax1.hist(target_species_scores[valid_mask & ~dfn[f"gt_{target_species}"]], bins=20, alpha=0.5, label="False")
+            ax1.plot(thresholds, [0] * len(thresholds), 'o', label="Thresholds")
+            ax1.set_yscale("log")
+            
+            precision = []
+            recall = []
+            for threshold in thresholds:
+                predicted = np.array([target_species_out if row[f"{pred_prefix}{target_species}"] >= threshold else "other" for _, row in dfn.iterrows()])
+                tp = ((predicted == target_species_out) &  dfn[f"gt_{target_species}"]).sum()
+                fp = ((predicted == target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
+                fn = ((predicted != target_species_out) &  dfn[f"gt_{target_species}"]).sum()
+                tn = ((predicted != target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
+                r = tp / (tp + fn)
+                p = tp / (tp + fp)
+                if np.isfinite([r, p]).all():
+                    recall += [r]
+                    precision += [p]
 
-                beforetime = Sys.time()
-                OccuMod <- occu(formula =  ~ 1 ~ 1,
-                    data = umf,
-                    method = "Nelder-Mead",
-                    starts = c(qlogis(psi_init), qlogis(p_init))
-                )
-                aftertime = Sys.time()
+            ax2.plot(recall, precision)
+            ax1.set_xlabel("Logit")
+            ax1.set_ylabel("Number of Observations")
+            ax2.set_xlabel("Recall")
+            ax2.set_ylabel("Precision")
+            fig.suptitle(target_species)
+            os.makedirs("figures/scores", exist_ok=True)
+            plt.savefig(f"figures/scores/{target_species}.pdf", bbox_inches="tight", transparent=True)
 
-                backTransform(OccuMod, type = "state")
-                backTransform(OccuMod, type = "det")
+    region_species = [species for species in target_species_list if dfn[f"gt_{species}"].sum() > 0]
+    for target_species in region_species:
+        target_species_scores = dfn[f"{pred_prefix}{target_species}"]
+        valid_mask = ~np.isnan(target_species_scores)
+        if np.sum(valid_mask) < n_sweep_steps:
+            print(f"Species '{target_species}' has to few samples, skipping...")
+            continue
+        thresholds = [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
+        threshold_types = ["gt"] + ["calibrated"] + ["sampled"] * (len(thresholds) - 2)
+        if gt_only:
+            thresholds, threshold_types = thresholds[0:1], threshold_types[0:1]
+        gt_state_df = {}
+        for threshold, threshold_type in zip(thresholds, threshold_types):
+            if threshold_type != "gt":
+                dfn["observed"] = dfn[f"{pred_prefix}{target_species}"] >= threshold
+            else:
+                dfn["observed"] = dfn[f"gt_{target_species}"]
 
-                plogis(confint(OccuMod, type = 'state', method = 'normal'))
-                plogis(confint(OccuMod, type = 'det', method = 'normal'))
+            print(dfn["observed"].sum(), f"positive observations with threshold {threshold}")
 
-                plogis(confint(OccuMod, type = 'state', method = 'normal', level = 0.50))
-                plogis(confint(OccuMod, type = 'det', method = 'normal', level = 0.50))
 
-                ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
-                "psi_TransformedPointEstimate" = unname(coef(OccuMod)["psi(Int)"]),
-                "psi_TransformedSE" = unname(SE(OccuMod)["psi(Int)"]),
-                "psi_PointEstimate" = backTransform(OccuMod, type = "state")@estimate,
-                "psi_CI95lower" = plogis(confint(OccuMod, type = 'state', method = 'normal'))[1],
-                "psi_CI95upper" = plogis(confint(OccuMod, type = 'state', method = 'normal'))[2],
-                "psi_CI50lower" = plogis(confint(OccuMod, type = 'state', method = 'normal', level = 0.50))[1],
-                "psi_CI50upper" = plogis(confint(OccuMod, type = 'state', method = 'normal', level = 0.50))[2],
-                "p_TransformedPointEstimate" = unname(coef(OccuMod)["p(Int)"]),
-                "p_TransformedSE" = unname(SE(OccuMod)["p(Int)"]),
-                "p_PointEstimate" = backTransform(OccuMod, type = "det")@estimate,
-                "p_CI95lower" = plogis(confint(OccuMod, type = 'det', method = 'normal'))[1],
-                "p_CI95upper" = plogis(confint(OccuMod, type = 'det', method = 'normal'))[2],
-                "p_CI50lower" = plogis(confint(OccuMod, type = 'det', method = 'normal', level = 0.50))[1],
-                "p_CI50upper" = plogis(confint(OccuMod, type = 'det', method = 'normal', level = 0.50))[2]
-                ))
-                ''',
-                BP_FP=r'''
-                library(unmarked)
-                library(tidyverse)
-                library(lubridate)
+            tp = ( dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
+            fp = ( dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
+            fn = (~dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
+            tn = (~dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
 
-                ModelComparisonDF <- data.frame()
+            recall = tp / (tp + fn)
+            precision = tp / (tp + fp)
+            f1 = (2 * precision * recall) / (precision + recall)
 
-                y <- (as.matrix(dfa) > 1) * 1
-                umf <- unmarkedFrameOccuFP(y=y, type=c(0,dim(y)[2],0))
+            print(f"{target_species} precision {precision:.2f} recall {recall:.2f} f1 {f1:.2f}")
 
-                siteCovs(umf) <- site_covs
+            
+            for aggregation, pd_freq in [("month", "ME"), ("week", "W"), ("day", "D")]:
 
-                (psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
-                (p_init <- mean(
-                    getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, 
-                    na.rm = T
-                ))
+                # # TODO: keep?
+                # valid_locations = set([row["name"] for _, row in covs.iterrows() if np.isfinite(row["region_label"])])
+                # dfn = dfn[dfn["location"].isin(valid_locations)]
 
-                beforetime = Sys.time()
-                OccuModFP <- occuFP(detformula =  ~ 1, stateformula=~1, FPformula=~1,
-                    data = umf,
-                    method = "Nelder-Mead",
-                    starts = c(qlogis(psi_init), qlogis(p_init), 0.5)
-                )
-                aftertime = Sys.time()
+                # TODO: implement better way to detect actual deployment times
 
-                backTransform(OccuModFP, type = "state")
-                backTransform(OccuModFP, type = "det")
+                dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
+                dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
+                
+                n_sites = dfn["location"].nunique()
+                if aggregation == "month":
+                    L = np.tile(dfa.columns.days_in_month.values, (n_sites, 1))
+                elif aggregation == "week":
+                    L = np.full((n_sites, len(dfa.columns)), 7)
+                elif aggregation == "day":
+                    L = np.full((n_sites, len(dfa.columns)), 1)
+                else:
+                    raise ValueError()
 
-                plogis(confint(OccuModFP, type = 'state', method = 'normal'))
-                plogis(confint(OccuModFP, type = 'det', method = 'normal'))
+                site_covs = []
+                for location in dfa.index:
+                    covs_filtered = covs[covs["name"] == location]
+                    if len(covs_filtered) == 0:
+                        raise ValueError()
+                        print(f"Warning: missing covariates for site {location}")
+                        site_covs.append({})  # TODO: this should not happen
+                    else:
+                        site_covs.append(covs_filtered.iloc[0].to_dict())
+                site_covs = pd.DataFrame(site_covs)
+                site_covs = site_covs.rename(columns=lambda x: x.replace("-", "_"))
+                # site_covs = pd.concat([site_covs, pd.get_dummies(site_covs["forest_type"])], axis=1).drop(columns=["forest_type"])
 
-                plogis(confint(OccuModFP, type = 'state', method = 'normal', level = 0.50))
-                plogis(confint(OccuModFP, type = 'det', method = 'normal', level = 0.50))
+                # inits = []
+                # c(qlogis(psi_init), qlogis(p_init), 0.5)
+                # TODO: estimate init for false positive rate
 
-                ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
-                "psi_TransformedPointEstimate" = unname(coef(OccuModFP)["psi(Int)"]),
-                "psi_TransformedSE" = unname(SE(OccuModFP)["psi(Int)"]),
-                "psi_PointEstimate" = backTransform(OccuModFP, type = "state")@estimate,
-                "psi_CI95lower" = plogis(confint(OccuModFP, type = 'state', method = 'normal'))[1],
-                "psi_CI95upper" = plogis(confint(OccuModFP, type = 'state', method = 'normal'))[2],
-                "psi_CI50lower" = plogis(confint(OccuModFP, type = 'state', method = 'normal', level = 0.50))[1],
-                "psi_CI50upper" = plogis(confint(OccuModFP, type = 'state', method = 'normal', level = 0.50))[2],
-                "p_TransformedPointEstimate" = unname(coef(OccuModFP)["p(Int)"]),
-                "p_TransformedSE" = unname(SE(OccuModFP)["p(Int)"]),
-                "p_PointEstimate" = backTransform(OccuModFP, type = "det")@estimate,
-                "p_CI95lower" = plogis(confint(OccuModFP, type = 'det', method = 'normal'))[1],
-                "p_CI95upper" = plogis(confint(OccuModFP, type = 'det', method = 'normal'))[2],
-                "p_CI50lower" = plogis(confint(OccuModFP, type = 'det', method = 'normal', level = 0.50))[1],
-                "p_CI50upper" = plogis(confint(OccuModFP, type = 'det', method = 'normal', level = 0.50))[2]
-                ))
-                ''',
-                COP=r'''
-                library(unmarked)
-                library(tidyverse)
-                library(lubridate)
+                ro.globalenv["dfa"] = py2r(dfa)
+                ro.globalenv["L"] = py2r(L)
+                ro.globalenv["site_covs"] = py2r(site_covs)
 
-                ModelComparisonDF <- data.frame()
-
-                umf = unmarkedFrameOccuCOP(
-                    y = as.matrix(dfa),
-                    L = matrix(
-                        data = L,
-                        nrow = nrow(dfa),
-                        ncol = ncol(dfa),
-                        dimnames = dimnames(dfa)
+                r_prefix = r'''
+                    library(unmarked)
+                    library(tidyverse)
+                    library(lubridate)
+                '''
+                r_scripts = dict(
+                    BP=r'''
+                    umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)
+                    siteCovs(umf) <- site_covs
+                    beforetime = Sys.time()
+                    mod <- occu(
+                        # formula =  ~ 1 ~ 1,
+                        formula = ~ 1 ~ tree_coverfraction,
+                        # formula =  ~ 1 ~ elevation + as.factor(forest_type),
+                        data = umf,
                     )
+                    aftertime = Sys.time()
+                    ''',
+                    BP_FP=r'''
+                    site <- data.frame(tree_coverfraction = site_covs$tree_coverfraction)
+                    y <- (as.matrix(dfa) > 1) * 1
+                    umf <- unmarkedFrameOccuFP(y=y, site, type=c(0,dim(y)[2],0))
+                    beforetime = Sys.time()
+                    mod = tryCatch({
+                        occuFP(
+                            detformula = ~ 1, stateformula= ~ tree_coverfraction, FPformula= ~ 1,
+                            data = umf,
+                        )
+                    }, warning = function(warning_condition) {
+                        NULL
+                    })
+                    aftertime = Sys.time()
+                    ''',
+                    COP=r'''
+                    umf = unmarkedFrameOccuCOP(
+                        y = as.matrix(dfa),
+                        L = matrix(
+                            data = L,
+                            nrow = nrow(dfa),
+                            ncol = ncol(dfa),
+                            dimnames = dimnames(dfa)
+                        ),
+                        siteCovs=site_covs,
+                    )
+                    beforetime = Sys.time()
+                    mod <- occuCOP(
+                        data = umf,
+                        psiformula =  ~ tree_coverfraction,
+                        lambdaformula =  ~ 1,
+                        # method = "Nelder-Mead",
+                        # psistarts = qlogis(psi_init),
+                        # lambdastarts = log(lambda_init)
+                    )
+                    aftertime = Sys.time()
+                    ''',
                 )
 
-                (psi_init <- mean(rowSums(getY(umf), na.rm = TRUE) > 0))
-                (lambda_init <- mean((getY(umf) / getL(umf))[rowSums(getY(umf), na.rm = TRUE) > 0, ], na.rm = T))
+                # TODO: re-enable
+                for model in ["BP", "BP_FP", "COP", "NAIVE"]:
+                    print(f"Fitting model '{model}'")
+                    model_comparison_df = pd.DataFrame([{}] * n_sites)
+                    fitting_time_elapsed = float("NaN")
+                    if model != "NAIVE":
+                        try:
+                            ro.r(r_prefix)
+                            ro.r(r_scripts[model])
+                            fitting_time_elapsed = ro.r("aftertime - beforetime").item()
+                            if not ro.r["is.null"](ro.r("mod"))[0]:
+                                model_comparison_df = r2py(ro.r("predict(mod, 'state')"))
+                                model_comparison_df.index = model_comparison_df.index.rename("Site")
+                                model_comparison_df = model_comparison_df.reset_index()
+                                assert len(model_comparison_df) == n_sites
+                        except Exception as e:
+                            print(f"Got exception: {e}")
+                    else:
+                        naive_occupancy = (dfa > 0).any(axis=1).sum() / len(dfa)
+                        model_comparison_df = pd.DataFrame([{ "Predicted": naive_occupancy }] * n_sites, index=dfa.index)
 
-                beforetime = Sys.time()
-                OccuCOPMod <- occuCOP(
-                    data = umf,
-                    psiformula =  ~ 1,
-                    lambdaformula =  ~ 1,
-                    method = "Nelder-Mead",
-                    psistarts = qlogis(psi_init),
-                    lambdastarts = log(lambda_init)
-                )
-                aftertime = Sys.time()
-
-                backTransform(OccuCOPMod, type = "psi")
-                backTransform(OccuCOPMod, type = "lambda")
-
-                plogis(confint(OccuCOPMod, type = 'psi', method = 'normal'))
-                plogis(confint(OccuCOPMod, type = 'lambda', method = 'normal'))
-
-                plogis(confint(OccuCOPMod, type = 'psi', method = 'normal', level = 0.50))
-                plogis(confint(OccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))
-
-                ModelComparisonDF <- bind_rows(ModelComparisonDF, data.frame(
-                "psi_TransformedPointEstimate" = unname(coef(OccuCOPMod)["psi(Int)"]),
-                "psi_TransformedSE" = unname(SE(OccuCOPMod)["psi(Int)"]),
-                "psi_PointEstimate" = backTransform(OccuCOPMod, type = "psi")@estimate,
-                "psi_CI95lower" = plogis(confint(OccuCOPMod, type = 'psi', method = 'normal'))[1],
-                "psi_CI95upper" = plogis(confint(OccuCOPMod, type = 'psi', method = 'normal'))[2],
-                "psi_CI50lower" = plogis(confint(OccuCOPMod, type = 'psi', method = 'normal', level = 0.50))[1],
-                "psi_CI50upper" = plogis(confint(OccuCOPMod, type = 'psi', method = 'normal', level = 0.50))[2],
-                "lambda_TransformedPointEstimate" = unname(coef(OccuCOPMod)["lambda(Int)"]),
-                "lambda_TransformedSE" = unname(SE(OccuCOPMod)["lambda(Int)"]),
-                "lambda_PointEstimate" = backTransform(OccuCOPMod, type = "lambda")@estimate,
-                "lambda_CI95lower" = exp(confint(OccuCOPMod, type = 'lambda', method = 'normal'))[1],
-                "lambda_CI95upper" = exp(confint(OccuCOPMod, type = 'lambda', method = 'normal'))[2],
-                "lambda_CI50lower" = plogis(confint(OccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[1],
-                "lambda_CI50upper" = plogis(confint(OccuCOPMod, type = 'lambda', method = 'normal', level = 0.50))[2]
-                ))
-                ''',
-            )
-
-            for model in ["BP", "BP_FP", "COP"]:
-                model_comparison_df = pd.DataFrame([{}])
-                fitting_time_elapsed = float("NaN")
-                try:
-                    robjects.r(r_scripts[model])
-                    model_comparison_df = robjects.conversion.get_conversion().rpy2py(robjects.r("ModelComparisonDF"))
-                    fitting_time_elapsed = robjects.r("aftertime - beforetime").item()
-                except Exception as e:
-                    print(f"Got exception: {e}")
-
-                assert len(model_comparison_df) == 1
-
-                model_comparison_df["Discretisation"] = aggregation.title()
-                model_comparison_df["Model"] = model
-                model_comparison_df["species"] = target_species
-                model_comparison_df["threshold"] = threshold
-                model_comparison_df["threshold_type"] = threshold_type
-                model_comparison_df["tp"] = tp
-                model_comparison_df["fp"] = fp
-                model_comparison_df["fn"] = fn
-                model_comparison_df["tn"] = tn
-                model_comparison_df["precision"] = precision
-                model_comparison_df["recall"] = recall
-                model_comparison_df["f1"] = f1
-                model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
-
-                output_table.append(model_comparison_df)
-                pd.concat(output_table).to_csv(output_table_path)
+                    model_comparison_df["Discretisation"] = aggregation.title()
+                    model_comparison_df["Model"] = model
+                    model_comparison_df["species"] = target_species
+                    model_comparison_df["threshold"] = threshold
+                    model_comparison_df["threshold_type"] = threshold_type
+                    model_comparison_df["tp"] = tp
+                    model_comparison_df["fp"] = fp
+                    model_comparison_df["fn"] = fn
+                    model_comparison_df["tn"] = tn
+                    model_comparison_df["precision"] = precision
+                    model_comparison_df["recall"] = recall
+                    model_comparison_df["f1"] = f1
+                    model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
+                    
+                    output_table.append(model_comparison_df)
+                    pd.concat(output_table).to_csv(output_table_path)

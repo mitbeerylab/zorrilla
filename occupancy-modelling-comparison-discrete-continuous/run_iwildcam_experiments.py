@@ -6,6 +6,12 @@ import pandas as pd
 import numpy as np
 import re
 from sklearn.model_selection import train_test_split
+from astral import LocationInfo, sun
+import astropy.coordinates as coord
+from astropy.time import Time
+import astropy.units as u
+from timezonefinder import TimezoneFinder
+from zoneinfo import ZoneInfo
 
 from multiprocessing import Process, Queue, Event
 
@@ -47,13 +53,46 @@ def main():
     os.chdir(os.path.dirname(__file__))
 
     target_species_out = "lynx"
-    output_path = os.path.join(os.path.dirname(__file__), "data", "metadata_iwildcam_2022_tmp_v3.RData")
+    output_path = os.path.join(os.path.dirname(__file__), "data", "metadata_iwildcam_2022_tmp_v4.RData")
     output_table_path = os.path.join(os.path.dirname(__file__), "data", "iwildcam_2022_results_v4.csv")
     # assert not os.path.exists(output_path)
+
+    tf = TimezoneFinder()
 
 
     # dfo = rdata.read_rda(os.path.join(os.path.dirname(__file__), "data", "metadata_Ain.RData"))["allfiles"]
     dfn = pd.read_csv(os.path.join(os.path.dirname(__file__), "..", "data", "iwildcam_2022_crops_bioclip_inference_logits_v3.csv"))
+    dfn["datetime"] = pd.to_datetime(dfn["datetime"])
+    df_dem = pd.read_csv(os.path.join(os.path.dirname(__file__), "..", "data", "iwildcam_2022_dem.csv"))
+    df_landcover = pd.read_csv(os.path.join(os.path.dirname(__file__), "..", "data", "iwildcam_2022_landcover.csv"))
+
+    dfn.merge(df_dem, left_on="location", right_on="name").merge(df_landcover, left_on="location", right_on="name")
+
+    # # compute time since sunrise/sunset
+    # for _, row in dfn:
+    #     loc = LocationInfo(latitude=row["latitude"], longitude=row["longitude"])
+    #     s = sun(loc.observer, date=row["datetime"])
+
+    
+    # compute sun altitude above horizon in degrees
+    alt = []
+    for _, row in dfn.iterrows():
+    # for _, row in dfn.sample(frac=1).iterrows():  # TODO: remove
+        if np.isfinite([row["latitude"], row["longitude"]]).all():
+            loc = coord.EarthLocation(lon=row["longitude"] * u.deg, lat=row["latitude"] * u.deg)
+            local_time = row["datetime"].to_pydatetime().replace(tzinfo=ZoneInfo(tf.timezone_at(lng=row["longitude"], lat=row["latitude"])))
+            time = Time(local_time)
+            altaz = coord.AltAz(location=loc, obstime=time)
+            sun = coord.get_sun(time)
+            alt += [float(sun.transform_to(altaz).alt / u.deg)]
+            # filepath = f"/data/vision/beery/scratch/data/iwildcam_unzipped/train/{row['file_name']}"
+            # print(alt[-1], local_time, filepath)
+        else:
+            alt += [None]
+
+    # quit()  # TODO: remove
+
+    dfn["sun_alt"] = alt
 
     print(f"number of sites: {dfn['location'].nunique()}")
     # print(f"number of observations: {Counter(dfo['observed'].tolist())}")
@@ -83,7 +122,9 @@ def main():
 
     best_threshold = {}
 
-    df_train, df_test = train_test_split(dfn, test_size=0.8, random_state=42)
+    # split along sequence IDs
+    train_seq, test_seq = train_test_split(dfn["seq_id"].unique(), test_size=0.8, random_state=42)
+    df_train, df_test = dfn[dfn["seq_id"].isin(train_seq)], dfn[dfn["seq_id"].isin(test_seq)]
 
     for target_species in target_species_list:
         gt = df_train[f"gt_{target_species}"]
