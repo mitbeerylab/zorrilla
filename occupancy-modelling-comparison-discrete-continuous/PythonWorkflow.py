@@ -95,6 +95,12 @@ for k in astral_times[0].keys():
     assert k not in dfn.columns
     dfn[k] = [e[k] for e in astral_times]
 
+dfn["hours_since_sunrise"] = ((dfn["datetime_local"] - dfn["sunrise"]) / np.timedelta64(1, "h")) % 24
+dfn["hours_since_sunset"] = ((dfn["datetime_local"] - dfn["sunset"]) / np.timedelta64(1, "h")) % 24
+
+# dfn["hours_since_sunrise"] = np.random.randn(len(dfn))
+# dfn["hours_since_sunset"] = np.random.randn(len(dfn))
+
 
 # TODO: re-enable
 # # compute sun altitude above horizon in degrees
@@ -129,8 +135,8 @@ target_species_list = [e.replace(" ", "_") for e in [
     "equus quagga",
     "madoqua guentheri",
     "leopardus pardalis",
-    "giraffa camelopardalis",
-    "sus scrofa",
+    # "giraffa camelopardalis",
+    # "sus scrofa",
     "mazama pandora",
     # "litocranius walleri",
     # "formicarius analis",
@@ -145,12 +151,16 @@ for target_species in target_species_list:
 train_seq, test_seq = train_test_split(dfn["seq_id"].unique(), test_size=0.8, random_state=42)
 df_train, df_test = dfn[dfn["seq_id"].isin(train_seq)], dfn[dfn["seq_id"].isin(test_seq)]
 
-if os.path.exists("cache/optimal_thresholds.json"):
+if os.path.exists("cache/optimal_thresholds.json") and os.path.exists("cache/threshold_fp_calibration.json"):
     with open("cache/optimal_thresholds.json") as f:
         best_threshold = json.load(f)
         assert set(best_threshold.keys()) == set(target_species_list)
+    with open("cache/threshold_fp_calibration.json") as f:
+        threshold_fp_calibration = json.load(f)
+        assert set(threshold_fp_calibration.keys()) == set(target_species_list)
 else:
     best_threshold = {}
+    threshold_fp_calibration = {target_species: {"threshold": [], "fpr": []} for target_species in target_species_list}
 
     for target_species in target_species_list:
         gt = df_train[f"gt_{target_species}"]
@@ -167,11 +177,14 @@ else:
             tn = ((scores <  s) & ~gt).sum()
             recall = tp / (tp + fn)
             precision = tp / (tp + fp)
+            fpr = fp / (fp + tn)
             if precision + recall > 0:
                 f1_item = (2 * precision * recall) / (precision + recall)
             else:
                 f1_item = 0
             f1 += [f1_item]
+            threshold_fp_calibration[target_species]["threshold"].append(s)
+            threshold_fp_calibration[target_species]["fpr"].append(float(fpr))
         f1 = np.array(f1)
         assert len(f1[np.isfinite(f1)]) > 0
         best_score = np.mean(scores_unique[f1 == f1[np.isfinite(f1)].max()])
@@ -181,6 +194,8 @@ else:
     os.makedirs("cache", exist_ok=True)
     with open("cache/optimal_thresholds.json", "w") as f:
         json.dump(best_threshold, f)
+    with open("cache/threshold_fp_calibration.json", "w") as f:
+        json.dump(threshold_fp_calibration, f)
 
 # TODO: re-enable
 # for region_label in sorted(covs["region_label"].unique()):
@@ -197,7 +212,7 @@ for region_labels in [[0, 3, 4]]:
 
     if not os.path.exists("figures/scores"):
         for target_species in target_species_list:
-            fig, (ax1, ax2) = plt.subplots(1, 2, )
+            fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(16, 4))
             target_species_scores = dfn[f"{pred_prefix}{target_species}"]
             valid_mask = np.isfinite(target_species_scores)
 
@@ -209,6 +224,7 @@ for region_labels in [[0, 3, 4]]:
             
             precision = []
             recall = []
+            threshold_valid = []
             for threshold in thresholds:
                 predicted = np.array([target_species_out if row[f"{pred_prefix}{target_species}"] >= threshold else "other" for _, row in dfn.iterrows()])
                 tp = ((predicted == target_species_out) &  dfn[f"gt_{target_species}"]).sum()
@@ -220,12 +236,19 @@ for region_labels in [[0, 3, 4]]:
                 if np.isfinite([r, p]).all():
                     recall += [r]
                     precision += [p]
+                    threshold_valid += [threshold]
 
             ax2.plot(recall, precision)
+            ax3.plot(threshold_valid, precision)
+            ax4.plot(threshold_valid, recall)
             ax1.set_xlabel("Logit")
             ax1.set_ylabel("Number of Observations")
             ax2.set_xlabel("Recall")
             ax2.set_ylabel("Precision")
+            ax3.set_xlabel("Logit")
+            ax3.set_ylabel("Precision")
+            ax4.set_xlabel("Logit")
+            ax4.set_ylabel("Recall")
             fig.suptitle(target_species)
             os.makedirs("figures/scores", exist_ok=True)
             plt.savefig(f"figures/scores/{target_species}.pdf", bbox_inches="tight", transparent=True)
@@ -258,6 +281,7 @@ for region_labels in [[0, 3, 4]]:
 
             recall = tp / (tp + fn)
             precision = tp / (tp + fp)
+            fpr = fp / (fp + tn)
             f1 = (2 * precision * recall) / (precision + recall)
 
             print(f"{target_species} precision {precision:.2f} recall {recall:.2f} f1 {f1:.2f}")
@@ -297,13 +321,15 @@ for region_labels in [[0, 3, 4]]:
                 site_covs = site_covs.rename(columns=lambda x: x.replace("-", "_"))
                 # site_covs = pd.concat([site_covs, pd.get_dummies(site_covs["forest_type"])], axis=1).drop(columns=["forest_type"])
 
+                obs_covs = dfn[["datetime", "location", "hours_since_sunrise", "hours_since_sunset"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).median().reset_index()
+                obs_covs = obs_covs.pivot(columns="datetime", index="location", values=["hours_since_sunrise", "hours_since_sunset"]).sort_values(by="location")
+                obs_covs_dict = {}
+                for cov_name in set(obs_covs.columns.get_level_values(0)):
+                    obs_covs_dict[cov_name] = obs_covs[cov_name]
+
                 # inits = []
                 # c(qlogis(psi_init), qlogis(p_init), 0.5)
                 # TODO: estimate init for false positive rate
-
-                ro.globalenv["dfa"] = py2r(dfa)
-                ro.globalenv["L"] = py2r(L)
-                ro.globalenv["site_covs"] = py2r(site_covs)
 
                 r_prefix = r'''
                     library(unmarked)
@@ -312,30 +338,24 @@ for region_labels in [[0, 3, 4]]:
                 '''
                 r_scripts = dict(
                     BP=r'''
-                    umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)
-                    siteCovs(umf) <- site_covs
+                    umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1, siteCovs=site_covs, obsCovs=obs_covs)
                     beforetime = Sys.time()
-                    mod <- occu(
-                        # formula =  ~ 1 ~ 1,
-                        formula = ~ 1 ~ tree_coverfraction,
-                        # formula =  ~ 1 ~ elevation + as.factor(forest_type),
+                    mod = occu(
                         data = umf,
+                        formula = ~ hours_since_sunrise + hours_since_sunset ~ tree_coverfraction + elevation,
+                        # starts = c(qlogis(psi_init), qlogis(p_init), 0, 0),
                     )
                     aftertime = Sys.time()
                     ''',
                     BP_FP=r'''
-                    site <- data.frame(tree_coverfraction = site_covs$tree_coverfraction)
                     y <- (as.matrix(dfa) > 1) * 1
-                    umf <- unmarkedFrameOccuFP(y=y, site, type=c(0,dim(y)[2],0))
+                    umf <- unmarkedFrameOccuFP(y=y, site_covs, obs_covs, type=c(0,dim(y)[2],0))
                     beforetime = Sys.time()
-                    mod = tryCatch({
-                        occuFP(
-                            detformula = ~ 1, stateformula= ~ tree_coverfraction, FPformula= ~ 1,
-                            data = umf,
-                        )
-                    }, warning = function(warning_condition) {
-                        NULL
-                    })
+                    mod = occuFP(
+                        data = umf,
+                        detformula = ~ hours_since_sunrise + hours_since_sunset, stateformula= ~ tree_coverfraction + elevation, FPformula= ~ hours_since_sunrise + hours_since_sunset,
+                        # starts = c(qlogis(psi_init), qlogis(p_init), fpr_init, 0)
+                    )
                     aftertime = Sys.time()
                     ''',
                     COP=r'''
@@ -348,39 +368,69 @@ for region_labels in [[0, 3, 4]]:
                             dimnames = dimnames(dfa)
                         ),
                         siteCovs=site_covs,
+                        obsCovs=obs_covs
                     )
                     beforetime = Sys.time()
-                    mod <- occuCOP(
+                    mod = occuCOP(
                         data = umf,
-                        psiformula =  ~ tree_coverfraction,
-                        lambdaformula =  ~ 1,
-                        # method = "Nelder-Mead",
-                        # psistarts = qlogis(psi_init),
-                        # lambdastarts = log(lambda_init)
+                        psiformula = ~ tree_coverfraction + elevation, lambdaformula = ~ hours_since_sunrise + hours_since_sunset,
+                        # psistarts = qlogis(psi_init), lambdastarts = log(mean(as.matrix(dfa)[rowSums(as.matrix(dfa)) > 0, ])),
+                        L1=TRUE,
                     )
                     aftertime = Sys.time()
                     ''',
                 )
 
-                # TODO: re-enable
-                for model in ["BP", "BP_FP", "COP", "NAIVE"]:
+                naive_occupancy = float("NaN")
+                naive_detection_probability = float("NaN")
+                naive_false_positive_rate = float("NaN")
+                for model in ["NAIVE", "BP", "BP_FP", "COP"]:
                     print(f"Fitting model '{model}'")
                     model_comparison_df = pd.DataFrame([{}] * n_sites)
                     fitting_time_elapsed = float("NaN")
                     if model != "NAIVE":
                         try:
-                            ro.r(r_prefix)
-                            ro.r(r_scripts[model])
-                            fitting_time_elapsed = ro.r("aftertime - beforetime").item()
-                            if not ro.r["is.null"](ro.r("mod"))[0]:
-                                model_comparison_df = r2py(ro.r("predict(mod, 'state')"))
-                                model_comparison_df.index = model_comparison_df.index.rename("Site")
-                                model_comparison_df = model_comparison_df.reset_index()
-                                assert len(model_comparison_df) == n_sites
+                            with robjects.local_context() as rctx:
+                                rctx["dfa"] = py2r(dfa)
+                                rctx["L"] = py2r(L)
+                                rctx["site_covs"] = py2r(site_covs)
+                                ro.r("obs_covs <- list()")
+                                ro.r("obs_covs_names <- list()")
+                                for obs_covs_name, obs_covs_df in obs_covs_dict.items():
+                                    rctx[obs_covs_name] = py2r(obs_covs_df)
+                                    # ro.r(f"colnames({obs_covs_name}) <- NULL")
+                                    # ro.r(f"rownames({obs_covs_name}) <- NULL")
+                                obs_covs_list_str = ",".join([f'"{obs_covs_name}" = as.matrix({obs_covs_name})' for obs_covs_name in obs_covs_dict.keys()])
+                                ro.r(f"obs_covs <- list({obs_covs_list_str})")
+                                rctx["psi_init"] = naive_occupancy
+                                rctx["p_init"] = naive_detection_probability
+                                rctx["fpr_init"] = naive_false_positive_rate
+                                ro.r(r_prefix)
+                                ro.r(r_scripts[model])
+                                fitting_time_elapsed = ro.r("aftertime - beforetime").item()
+                                success = not ro.r["is.null"](ro.r("mod"))[0]
+                                if success:
+                                    if model not in ["COP"]:
+                                        model_comparison_df = r2py(ro.r("predict(mod, 'state')"))
+                                    else:
+                                        model_comparison_df = r2py(ro.r("predict(mod, 'psi')"))
+                                    model_comparison_df.index = model_comparison_df.index.rename("Site")
+                                    model_comparison_df = model_comparison_df.reset_index()
+                                    assert len(model_comparison_df) == n_sites
                         except Exception as e:
                             print(f"Got exception: {e}")
                     else:
-                        naive_occupancy = (dfa > 0).any(axis=1).sum() / len(dfa)
+                        naive_occupancy = (dfa > 0).any(axis=1).mean()
+
+                        # TODO: the R version taken from the original code differs from the pure Python re-implementation below. Check which one is correct.
+                        with robjects.local_context() as rctx:
+                            ro.r(r_prefix)
+                            rctx["dfa"] = py2r(dfa)
+                            ro.r("umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)")
+                            naive_detection_probability = ro.r("mean(getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, na.rm = TRUE)").item()
+                        # naive_detection_probability = (dfa[(dfa > 0).any(axis=1)] > 0).mean(axis=1).mean()
+                        
+                        naive_false_positive_rate = np.interp(threshold, threshold_fp_calibration[target_species]["threshold"], threshold_fp_calibration[target_species]["fpr"])
                         model_comparison_df = pd.DataFrame([{ "Predicted": naive_occupancy }] * n_sites, index=dfa.index)
 
                     model_comparison_df["Discretisation"] = aggregation.title()
@@ -394,6 +444,7 @@ for region_labels in [[0, 3, 4]]:
                     model_comparison_df["tn"] = tn
                     model_comparison_df["precision"] = precision
                     model_comparison_df["recall"] = recall
+                    model_comparison_df["fpr"] = fpr
                     model_comparison_df["f1"] = f1
                     model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
                     
