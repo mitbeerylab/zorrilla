@@ -151,3 +151,36 @@ jagsResult_fp <- jagsUI::jags(
 )
 
 print(jagsResult_fp)
+
+# Compare to unmarked
+library(unmarked)
+umf <- unmarkedFrameOccuFP(y=y, type=c(0,dim(y)[2],0), siteCovs=site_covs)
+
+# Model with false positives, but no covariates
+m1 <- occuFP(detformula = ~ 1, FPformula = ~ 1, stateformula = ~ 1, data=umf, method="Nelder-Mead", se = TRUE)
+summary(m1)
+backTransform(m1, 'state')
+backTransform(m1, 'det')
+backTransform(m1, 'fp')
+
+
+#Model with false positives and occupancy covariates
+m1b <- occuFP(detformula = ~ 1, FPformula = ~ 1, stateformula = ~ site_cov, data=umf, method="Nelder-Mead", se = TRUE)
+summary(m1b)
+lc1b<- linearComb(m1b, c(1, mean(site_cov)), type = "state")
+backTransform(lc1b)
+backTransform(m1b, 'det')
+backTransform(m1b, 'fp')
+
+# No false positives
+umf2 <- unmarkedFrameOccu(y=y, siteCovs=site_covs)
+
+m2 <- occu(~1 ~ 1, data=umf2, method="Nelder-Mead", se = TRUE, linkPsi="logit")
+summary(m2)
+backTransform(m2, 'state')
+backTransform(m2, 'det')
+
+m2b <- occu(~1 ~site_cov, data=umf2, method="Nelder-Mead", se = TRUE, linkPsi="logit")
+summary(m2b)
+lc2b<- linearComb(m2b, c(1, mean(site_cov)), type = "state")
+backTransform(lc2b)
