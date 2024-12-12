@@ -3,8 +3,8 @@ library(jagsUI)
 # Generate occupancy and site-level covariates
 n_sites <- 100 # number of sites
 site_cov <- rnorm(n_sites)
-beta1 <- 1 # intercept for occupancy logistic regression
-beta0 <- -1 # slope for occupancy logistic regression
+beta1 <- 1 # slope for occupancy logistic regression
+beta0 <- -1 # intercept for occupancy logistic regression
 psi <- 0.2 # proportion of sites occupied (only used if not using logistic regression to generate psi)
 psi_cov <- 1/(1+exp(-(beta0 + beta1*site_cov)))
 z <- rbinom(n=n_sites,1,psi_cov) # vector of latent occupancy status for each site
