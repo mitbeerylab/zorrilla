@@ -24,6 +24,7 @@ rpy2.robjects.pandas2ri.activate()
 from multiprocessing import Process, Queue, Event
 import json
 from functools import cache
+from collections import defaultdict
 
 
 tf = TimezoneFinder()
@@ -53,8 +54,7 @@ def get_thresholds(target_species_scores, n_sweep_steps):
     return np.linspace(np.min(target_species_scores[valid_mask]), np.max(target_species_scores[valid_mask]), n_sweep_steps)
     # return np.percentile(target_species_scores[valid_mask], np.linspace(0, 100, n_sweep_steps))
 
-target_species_out = "lynx"
-output_table_path = os.path.join("data", "iwildcam_2022_results_v6.csv")
+output_table_path = os.path.join("data", "iwildcam_2022_results_v9.csv")
 
 
 
@@ -97,6 +97,12 @@ for k in astral_times[0].keys():
 
 dfn["hours_since_sunrise"] = ((dfn["datetime_local"] - dfn["sunrise"]) / np.timedelta64(1, "h")) % 24
 dfn["hours_since_sunset"] = ((dfn["datetime_local"] - dfn["sunset"]) / np.timedelta64(1, "h")) % 24
+dfn["hours_since_sunrise"] = (dfn["hours_since_sunrise"] - dfn["hours_since_sunrise"].mean()) / dfn["hours_since_sunrise"].std()
+dfn["hours_since_sunset"] = (dfn["hours_since_sunset"] - dfn["hours_since_sunset"].mean()) / dfn["hours_since_sunset"].std()
+
+# TODO: make configurable
+covs["tree-coverfraction"] = (covs["tree-coverfraction"] - covs["tree-coverfraction"].mean()) / covs["tree-coverfraction"].std()
+covs["elevation"] = (covs["elevation"] - covs["elevation"].mean()) / covs["elevation"].std()
 
 # dfn["hours_since_sunrise"] = np.random.randn(len(dfn))
 # dfn["hours_since_sunset"] = np.random.randn(len(dfn))
@@ -127,6 +133,8 @@ print(f"number of sites overall: {dfn['location'].nunique()}")
 pred_prefix = "logit_"  # "pred_" or "logit_"
 n_sweep_steps = 11
 calibration_min_samples = 10
+filter_topn = True
+filter_topn_rank = 3
 
 # target_species_list = None
 target_species_list = [e.replace(" ", "_") for e in [
@@ -226,11 +234,11 @@ for region_labels in [[0, 3, 4]]:
             recall = []
             threshold_valid = []
             for threshold in thresholds:
-                predicted = np.array([target_species_out if row[f"{pred_prefix}{target_species}"] >= threshold else "other" for _, row in dfn.iterrows()])
-                tp = ((predicted == target_species_out) &  dfn[f"gt_{target_species}"]).sum()
-                fp = ((predicted == target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
-                fn = ((predicted != target_species_out) &  dfn[f"gt_{target_species}"]).sum()
-                tn = ((predicted != target_species_out) & ~dfn[f"gt_{target_species}"]).sum()
+                predicted = dfn[f"{pred_prefix}{target_species}"] >= threshold
+                tp = (( predicted) &  dfn[f"gt_{target_species}"]).sum()
+                fp = (( predicted) & ~dfn[f"gt_{target_species}"]).sum()
+                fn = ((~predicted) &  dfn[f"gt_{target_species}"]).sum()
+                tn = ((~predicted) & ~dfn[f"gt_{target_species}"]).sum()
                 r = tp / (tp + fn)
                 p = tp / (tp + fp)
                 if np.isfinite([r, p]).all():
@@ -255,29 +263,31 @@ for region_labels in [[0, 3, 4]]:
 
     region_species = [species for species in target_species_list if dfn[f"gt_{species}"].sum() > 0]
     for target_species in region_species:
-        target_species_scores = dfn[f"{pred_prefix}{target_species}"]
+        target_species_gt_col = f"gt_{target_species}"
+        target_species_score_col = f"{pred_prefix}{target_species}"
+        target_species_scores = dfn[target_species_score_col]
         valid_mask = ~np.isnan(target_species_scores)
         if np.sum(valid_mask) < n_sweep_steps:
             print(f"Species '{target_species}' has to few samples, skipping...")
             continue
-        thresholds = [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
-        threshold_types = ["gt"] + ["calibrated"] + ["sampled"] * (len(thresholds) - 2)
+        thresholds = [float("NaN")] + [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
+        threshold_types = ["gt"] + ["topn"] +["calibrated"] + ["sampled"] * (len(thresholds) - 2)
         if gt_only:
             thresholds, threshold_types = thresholds[0:1], threshold_types[0:1]
         gt_state_df = {}
         for threshold, threshold_type in zip(thresholds, threshold_types):
             if threshold_type != "gt":
-                dfn["observed"] = dfn[f"{pred_prefix}{target_species}"] >= threshold
+                dfn["observed"] = dfn[target_species_score_col] >= threshold
             else:
-                dfn["observed"] = dfn[f"gt_{target_species}"]
+                dfn["observed"] = dfn[target_species_gt_col]
 
             print(dfn["observed"].sum(), f"positive observations with threshold {threshold}")
 
 
-            tp = ( dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
-            fp = ( dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
-            fn = (~dfn["observed"] &  dfn[f"gt_{target_species}"]).sum()
-            tn = (~dfn["observed"] & ~dfn[f"gt_{target_species}"]).sum()
+            tp = ( dfn["observed"] &  dfn[target_species_gt_col]).sum()
+            fp = ( dfn["observed"] & ~dfn[target_species_gt_col]).sum()
+            fn = (~dfn["observed"] &  dfn[target_species_gt_col]).sum()
+            tn = (~dfn["observed"] & ~dfn[target_species_gt_col]).sum()
 
             recall = tp / (tp + fn)
             precision = tp / (tp + fp)
@@ -294,9 +304,23 @@ for region_labels in [[0, 3, 4]]:
                 # dfn = dfn[dfn["location"].isin(valid_locations)]
 
                 # TODO: implement better way to detect actual deployment times
-
-                dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
-                dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
+                if threshold_type == "topn":
+                    dfa = dfn[["datetime", "location", target_species_score_col]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).apply(lambda x: np.sort(x[target_species_score_col])).reset_index()
+                    dfa = dfa.pivot(columns="datetime", index="location").sort_values(by="location")
+                    dfa.columns = dfa.columns.get_level_values(1)
+                    topn = dfn[["datetime", "location"] + [e for e in dfn.columns if e.startswith(pred_prefix)]].melt(id_vars=["datetime", "location"], value_name="score").groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).agg({"score": lambda x: (np.sort(x)[-filter_topn_rank] if (len(x) >= filter_topn_rank) else np.sort(x)[0])}).reset_index()
+                    topn = topn.pivot(columns="datetime", index="location", values="score").sort_values(by="location")
+                    assert dfa.shape == topn.shape
+                    for i, idx in enumerate(dfa.index):
+                        for j, col in enumerate(dfa.columns):
+                            try:
+                                thres = topn.iloc[i, j]
+                            except IndexError:
+                                thres = float("inf")
+                            dfa.iloc[i, j] = (np.array(dfa.iloc[i, j]) >= thres).sum().item()
+                else:
+                    dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
+                    dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
                 
                 n_sites = dfn["location"].nunique()
                 if aggregation == "month":
@@ -307,6 +331,10 @@ for region_labels in [[0, 3, 4]]:
                     L = np.full((n_sites, len(dfa.columns)), 1)
                 else:
                     raise ValueError()
+
+                # TODO: keep?
+                # # rename columns because rpy2 does not handle datetimes well
+                # dfa.columns = range(len(dfa.columns))
 
                 site_covs = []
                 for location in dfa.index:
@@ -344,6 +372,7 @@ for region_labels in [[0, 3, 4]]:
                         data = umf,
                         formula = ~ hours_since_sunrise + hours_since_sunset ~ tree_coverfraction + elevation,
                         # starts = c(qlogis(psi_init), qlogis(p_init), 0, 0),
+                        method="Nelder-Mead"
                     )
                     aftertime = Sys.time()
                     ''',
@@ -354,7 +383,8 @@ for region_labels in [[0, 3, 4]]:
                     mod = occuFP(
                         data = umf,
                         detformula = ~ hours_since_sunrise + hours_since_sunset, stateformula= ~ tree_coverfraction + elevation, FPformula= ~ hours_since_sunrise + hours_since_sunset,
-                        # starts = c(qlogis(psi_init), qlogis(p_init), fpr_init, 0)
+                        # starts = c(qlogis(psi_init), qlogis(p_init), fpr_init, 0, 0, 0, 0, 0, 0),
+                        method="Nelder-Mead"
                     )
                     aftertime = Sys.time()
                     ''',
@@ -375,6 +405,7 @@ for region_labels in [[0, 3, 4]]:
                         data = umf,
                         psiformula = ~ tree_coverfraction + elevation, lambdaformula = ~ hours_since_sunrise + hours_since_sunset,
                         # psistarts = qlogis(psi_init), lambdastarts = log(mean(as.matrix(dfa)[rowSums(as.matrix(dfa)) > 0, ])),
+                        method="Nelder-Mead",
                         L1=TRUE,
                     )
                     aftertime = Sys.time()
@@ -386,6 +417,10 @@ for region_labels in [[0, 3, 4]]:
                 naive_false_positive_rate = float("NaN")
                 for model in ["NAIVE", "BP", "BP_FP", "COP"]:
                     print(f"Fitting model '{model}'")
+                    parameter_names = {
+                        "state": defaultdict(lambda: "state", { "COP": "psi" })[model],
+                        "det": defaultdict(lambda: "det", { "COP": "lambda" })[model],
+                    }
                     model_comparison_df = pd.DataFrame([{}] * n_sites)
                     fitting_time_elapsed = float("NaN")
                     if model != "NAIVE":
@@ -410,10 +445,11 @@ for region_labels in [[0, 3, 4]]:
                                 fitting_time_elapsed = ro.r("aftertime - beforetime").item()
                                 success = not ro.r["is.null"](ro.r("mod"))[0]
                                 if success:
-                                    if model not in ["COP"]:
-                                        model_comparison_df = r2py(ro.r("predict(mod, 'state')"))
-                                    else:
-                                        model_comparison_df = r2py(ro.r("predict(mod, 'psi')"))
+                                    model_comparison_df = r2py(ro.r(f"predict(mod, '{parameter_names['state']}')"))
+                                    for cov_type in ["state", "det"]:
+                                        for cov_name, cov_value, cov_se in zip(r2py(ro.r(f"names(mod@estimates['{parameter_names[cov_type]}']@estimates)")), r2py(ro.r(f"mod@estimates['{parameter_names[cov_type]}']@estimates")), r2py(ro.r(f"SE(mod@estimates['{parameter_names[cov_type]}'])"))):
+                                            model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}"] = cov_value
+                                            model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}_se"] = cov_value
                                     model_comparison_df.index = model_comparison_df.index.rename("Site")
                                     model_comparison_df = model_comparison_df.reset_index()
                                     assert len(model_comparison_df) == n_sites
