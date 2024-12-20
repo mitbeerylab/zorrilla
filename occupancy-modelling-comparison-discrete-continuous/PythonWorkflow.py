@@ -23,8 +23,9 @@ rpy2.robjects.numpy2ri.activate()
 rpy2.robjects.pandas2ri.activate()
 from multiprocessing import Process, Queue, Event
 import json
-from functools import cache
+from functools import cache, partial
 from collections import defaultdict
+from numpyro_models import occu, run
 
 
 tf = TimezoneFinder()
@@ -54,7 +55,7 @@ def get_thresholds(target_species_scores, n_sweep_steps):
     return np.linspace(np.min(target_species_scores[valid_mask]), np.max(target_species_scores[valid_mask]), n_sweep_steps)
     # return np.percentile(target_species_scores[valid_mask], np.linspace(0, 100, n_sweep_steps))
 
-output_table_path = os.path.join("data", "iwildcam_2022_results_v9.csv")
+output_table_path = os.path.join("data", "iwildcam_2022_results_v10.csv")
 
 
 
@@ -151,6 +152,9 @@ target_species_list = [e.replace(" ", "_") for e in [
     # "tragulus javanicus",
     # "tupinambis teguixin",
 ]]
+
+site_covs_list = ["elevation", "tree_coverfraction"]
+obs_covs_list = ["hours_since_sunrise", "hours_since_sunset"]
 
 for target_species in target_species_list:
     scores = dfn[f"{pred_prefix}{target_species}"] = dfn[f"{pred_prefix}{target_species}"].fillna(value=-float("inf"))
@@ -349,8 +353,8 @@ for region_labels in [[0, 3, 4]]:
                 site_covs = site_covs.rename(columns=lambda x: x.replace("-", "_"))
                 # site_covs = pd.concat([site_covs, pd.get_dummies(site_covs["forest_type"])], axis=1).drop(columns=["forest_type"])
 
-                obs_covs = dfn[["datetime", "location", "hours_since_sunrise", "hours_since_sunset"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).median().reset_index()
-                obs_covs = obs_covs.pivot(columns="datetime", index="location", values=["hours_since_sunrise", "hours_since_sunset"]).sort_values(by="location")
+                obs_covs = dfn[["datetime", "location"] + obs_covs_list].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).median().reset_index()
+                obs_covs = obs_covs.pivot(columns="datetime", index="location", values=obs_covs_list).sort_values(by="location")
                 obs_covs_dict = {}
                 for cov_name in set(obs_covs.columns.get_level_values(0)):
                     obs_covs_dict[cov_name] = obs_covs[cov_name]
@@ -359,130 +363,146 @@ for region_labels in [[0, 3, 4]]:
                 # c(qlogis(psi_init), qlogis(p_init), 0.5)
                 # TODO: estimate init for false positive rate
 
-                r_prefix = r'''
-                    library(unmarked)
-                    library(tidyverse)
-                    library(lubridate)
-                '''
-                r_scripts = dict(
-                    BP=r'''
-                    umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1, siteCovs=site_covs, obsCovs=obs_covs)
-                    beforetime = Sys.time()
-                    mod = occu(
-                        data = umf,
-                        formula = ~ hours_since_sunrise + hours_since_sunset ~ tree_coverfraction + elevation,
-                        # starts = c(qlogis(psi_init), qlogis(p_init), 0, 0),
-                        method="Nelder-Mead"
-                    )
-                    aftertime = Sys.time()
-                    ''',
-                    BP_FP=r'''
-                    y <- (as.matrix(dfa) > 1) * 1
-                    umf <- unmarkedFrameOccuFP(y=y, site_covs, obs_covs, type=c(0,dim(y)[2],0))
-                    beforetime = Sys.time()
-                    mod = occuFP(
-                        data = umf,
-                        detformula = ~ hours_since_sunrise + hours_since_sunset, stateformula= ~ tree_coverfraction + elevation, FPformula= ~ hours_since_sunrise + hours_since_sunset,
-                        # starts = c(qlogis(psi_init), qlogis(p_init), fpr_init, 0, 0, 0, 0, 0, 0),
-                        method="Nelder-Mead"
-                    )
-                    aftertime = Sys.time()
-                    ''',
-                    COP=r'''
-                    umf = unmarkedFrameOccuCOP(
-                        y = as.matrix(dfa),
-                        L = matrix(
-                            data = L,
-                            nrow = nrow(dfa),
-                            ncol = ncol(dfa),
-                            dimnames = dimnames(dfa)
-                        ),
-                        siteCovs=site_covs,
-                        obsCovs=obs_covs
-                    )
-                    beforetime = Sys.time()
-                    mod = occuCOP(
-                        data = umf,
-                        psiformula = ~ tree_coverfraction + elevation, lambdaformula = ~ hours_since_sunrise + hours_since_sunset,
-                        # psistarts = qlogis(psi_init), lambdastarts = log(mean(as.matrix(dfa)[rowSums(as.matrix(dfa)) > 0, ])),
-                        method="Nelder-Mead",
-                        L1=TRUE,
-                    )
-                    aftertime = Sys.time()
-                    ''',
-                )
+                for implementation in ["R", "NumPyro"]:
 
-                naive_occupancy = float("NaN")
-                naive_detection_probability = float("NaN")
-                naive_false_positive_rate = float("NaN")
-                for model in ["NAIVE", "BP", "BP_FP", "COP"]:
-                    print(f"Fitting model '{model}'")
-                    parameter_names = {
-                        "state": defaultdict(lambda: "state", { "COP": "psi" })[model],
-                        "det": defaultdict(lambda: "det", { "COP": "lambda" })[model],
-                    }
-                    model_comparison_df = pd.DataFrame([{}] * n_sites)
-                    fitting_time_elapsed = float("NaN")
-                    if model != "NAIVE":
-                        try:
+                    r_prefix = r'''
+                        library(unmarked)
+                        library(tidyverse)
+                        library(lubridate)
+                    '''
+                    r_scripts = dict(
+                        BP=f'''
+                        umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1, siteCovs=site_covs, obsCovs=obs_covs)
+                        beforetime = Sys.time()
+                        mod = occu(
+                            data = umf,
+                            formula = ~ {" + ".join(obs_covs_list)} ~ {" + ".join(site_covs_list)},
+                            # starts = c(qlogis(psi_init), qlogis(p_init), 0, 0),
+                            method="Nelder-Mead"
+                        )
+                        aftertime = Sys.time()
+                        ''',
+                        BP_FP=f'''
+                        y <- (as.matrix(dfa) > 1) * 1
+                        umf <- unmarkedFrameOccuFP(y=y, site_covs, obs_covs, type=c(0,dim(y)[2],0))
+                        beforetime = Sys.time()
+                        mod = occuFP(
+                            data = umf,
+                            detformula = ~ {" + ".join(obs_covs_list)}, stateformula= ~ {" + ".join(site_covs_list)}, FPformula= ~ 1,
+                            # starts = c(qlogis(psi_init), qlogis(p_init), fpr_init, 0, 0, 0, 0, 0, 0),
+                            method="Nelder-Mead"
+                        )
+                        aftertime = Sys.time()
+                        ''',
+                        COP=f'''
+                        umf = unmarkedFrameOccuCOP(
+                            y = as.matrix(dfa),
+                            L = matrix(
+                                data = L,
+                                nrow = nrow(dfa),
+                                ncol = ncol(dfa),
+                                dimnames = dimnames(dfa)
+                            ),
+                            siteCovs=site_covs,
+                            obsCovs=obs_covs
+                        )
+                        beforetime = Sys.time()
+                        mod = occuCOP(
+                            data = umf,
+                            psiformula = ~ {" + ".join(site_covs_list)}, lambdaformula = ~ {" + ".join(obs_covs_list)},
+                            # psistarts = qlogis(psi_init), lambdastarts = log(mean(as.matrix(dfa)[rowSums(as.matrix(dfa)) > 0, ])),
+                            method="Nelder-Mead",
+                            L1=TRUE,
+                        )
+                        aftertime = Sys.time()
+                        ''',
+                    )
+
+                    naive_occupancy = float("NaN")
+                    naive_detection_probability = float("NaN")
+                    naive_false_positive_rate = float("NaN")
+                    for model in ["NAIVE", "BP", "BP_FP", "COP"]:
+                        print(f"Fitting model '{model}'")
+                        parameter_names = {
+                            "state": defaultdict(lambda: "state", { "COP": "psi" })[model],
+                            "det": defaultdict(lambda: "det", { "COP": "lambda" })[model],
+                        }
+                        model_comparison_df = pd.DataFrame([{}] * n_sites)
+                        fitting_time_elapsed = float("NaN")
+                        if model != "NAIVE":
+                            if implementation == "R":
+                                try:
+                                    with robjects.local_context() as rctx:
+                                        rctx["dfa"] = py2r(dfa)
+                                        rctx["L"] = py2r(L)
+                                        rctx["site_covs"] = py2r(site_covs)
+                                        ro.r("obs_covs <- list()")
+                                        ro.r("obs_covs_names <- list()")
+                                        for obs_covs_name, obs_covs_df in obs_covs_dict.items():
+                                            rctx[obs_covs_name] = py2r(obs_covs_df)
+                                        obs_covs_list_str = ",".join([f'"{obs_covs_name}" = as.matrix({obs_covs_name})' for obs_covs_name in obs_covs_dict.keys()])
+                                        ro.r(f"obs_covs <- list({obs_covs_list_str})")
+                                        rctx["psi_init"] = naive_occupancy
+                                        rctx["p_init"] = naive_detection_probability
+                                        rctx["fpr_init"] = naive_false_positive_rate
+                                        ro.r(r_prefix)
+                                        ro.r(r_scripts[model])
+                                        fitting_time_elapsed = ro.r("aftertime - beforetime").item()
+                                        success = not ro.r["is.null"](ro.r("mod"))[0]
+                                        if success:
+                                            model_comparison_df = r2py(ro.r(f"predict(mod, '{parameter_names['state']}')"))
+                                            try:
+                                                model_comparison_df["FPProb"] = r2py(ro.r(f"predict(mod, type = 'fp')"))["Predicted"]
+                                            except:
+                                                pass
+                                            for cov_type in ["state", "det"]:
+                                                for cov_name, cov_value, cov_se in zip(r2py(ro.r(f"names(mod@estimates['{parameter_names[cov_type]}']@estimates)")), r2py(ro.r(f"mod@estimates['{parameter_names[cov_type]}']@estimates")), r2py(ro.r(f"SE(mod@estimates['{parameter_names[cov_type]}'])"))):
+                                                    model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}"] = cov_value
+                                                    model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}_se"] = cov_value
+                                            model_comparison_df.index = model_comparison_df.index.rename("Site")
+                                            model_comparison_df = model_comparison_df.reset_index()
+                                            assert len(model_comparison_df) == n_sites
+                                            model_comparison_df["implementation"] = implementation
+                                except Exception as e:
+                                    print(f"Got exception: {e}")
+                            elif implementation == "NumPyro":
+                                if model != "COP":
+                                    model_fn = dict(BP=partial(occu, false_positives=False), BP_FP=partial(occu, false_positives=True), COP=None)[model]
+                                    try:
+                                        model_comparison_df = run(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=(dfa > 0) * 1)
+                                        model_comparison_df.index = dfa.index
+                                        model_comparison_df["implementation"] = implementation
+                                    except Exception as e:
+                                        print(f"Got exception: {e}")
+                                        pass
+                        else:
+                            naive_occupancy = (dfa > 0).any(axis=1).mean()
+
+                            # TODO: the R version taken from the original code differs from the pure Python re-implementation below. Check which one is correct.
                             with robjects.local_context() as rctx:
-                                rctx["dfa"] = py2r(dfa)
-                                rctx["L"] = py2r(L)
-                                rctx["site_covs"] = py2r(site_covs)
-                                ro.r("obs_covs <- list()")
-                                ro.r("obs_covs_names <- list()")
-                                for obs_covs_name, obs_covs_df in obs_covs_dict.items():
-                                    rctx[obs_covs_name] = py2r(obs_covs_df)
-                                    # ro.r(f"colnames({obs_covs_name}) <- NULL")
-                                    # ro.r(f"rownames({obs_covs_name}) <- NULL")
-                                obs_covs_list_str = ",".join([f'"{obs_covs_name}" = as.matrix({obs_covs_name})' for obs_covs_name in obs_covs_dict.keys()])
-                                ro.r(f"obs_covs <- list({obs_covs_list_str})")
-                                rctx["psi_init"] = naive_occupancy
-                                rctx["p_init"] = naive_detection_probability
-                                rctx["fpr_init"] = naive_false_positive_rate
                                 ro.r(r_prefix)
-                                ro.r(r_scripts[model])
-                                fitting_time_elapsed = ro.r("aftertime - beforetime").item()
-                                success = not ro.r["is.null"](ro.r("mod"))[0]
-                                if success:
-                                    model_comparison_df = r2py(ro.r(f"predict(mod, '{parameter_names['state']}')"))
-                                    for cov_type in ["state", "det"]:
-                                        for cov_name, cov_value, cov_se in zip(r2py(ro.r(f"names(mod@estimates['{parameter_names[cov_type]}']@estimates)")), r2py(ro.r(f"mod@estimates['{parameter_names[cov_type]}']@estimates")), r2py(ro.r(f"SE(mod@estimates['{parameter_names[cov_type]}'])"))):
-                                            model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}"] = cov_value
-                                            model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}_se"] = cov_value
-                                    model_comparison_df.index = model_comparison_df.index.rename("Site")
-                                    model_comparison_df = model_comparison_df.reset_index()
-                                    assert len(model_comparison_df) == n_sites
-                        except Exception as e:
-                            print(f"Got exception: {e}")
-                    else:
-                        naive_occupancy = (dfa > 0).any(axis=1).mean()
+                                rctx["dfa"] = py2r(dfa)
+                                ro.r("umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)")
+                                naive_detection_probability = ro.r("mean(getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, na.rm = TRUE)").item()
+                            # naive_detection_probability = (dfa[(dfa > 0).any(axis=1)] > 0).mean(axis=1).mean()
+                            
+                            naive_false_positive_rate = np.interp(threshold, threshold_fp_calibration[target_species]["threshold"], threshold_fp_calibration[target_species]["fpr"])
+                            model_comparison_df = pd.DataFrame([{ "Predicted": naive_occupancy }] * n_sites, index=dfa.index)
 
-                        # TODO: the R version taken from the original code differs from the pure Python re-implementation below. Check which one is correct.
-                        with robjects.local_context() as rctx:
-                            ro.r(r_prefix)
-                            rctx["dfa"] = py2r(dfa)
-                            ro.r("umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1)")
-                            naive_detection_probability = ro.r("mean(getY(umf)[rowSums(getY(umf), na.rm = TRUE) > 0,] > 0, na.rm = TRUE)").item()
-                        # naive_detection_probability = (dfa[(dfa > 0).any(axis=1)] > 0).mean(axis=1).mean()
+                        model_comparison_df["Discretisation"] = aggregation.title()
+                        model_comparison_df["Model"] = model
+                        model_comparison_df["species"] = target_species
+                        model_comparison_df["threshold"] = threshold
+                        model_comparison_df["threshold_type"] = threshold_type
+                        model_comparison_df["tp"] = tp
+                        model_comparison_df["fp"] = fp
+                        model_comparison_df["fn"] = fn
+                        model_comparison_df["tn"] = tn
+                        model_comparison_df["precision"] = precision
+                        model_comparison_df["recall"] = recall
+                        model_comparison_df["fpr"] = fpr
+                        model_comparison_df["f1"] = f1
+                        model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
                         
-                        naive_false_positive_rate = np.interp(threshold, threshold_fp_calibration[target_species]["threshold"], threshold_fp_calibration[target_species]["fpr"])
-                        model_comparison_df = pd.DataFrame([{ "Predicted": naive_occupancy }] * n_sites, index=dfa.index)
-
-                    model_comparison_df["Discretisation"] = aggregation.title()
-                    model_comparison_df["Model"] = model
-                    model_comparison_df["species"] = target_species
-                    model_comparison_df["threshold"] = threshold
-                    model_comparison_df["threshold_type"] = threshold_type
-                    model_comparison_df["tp"] = tp
-                    model_comparison_df["fp"] = fp
-                    model_comparison_df["fn"] = fn
-                    model_comparison_df["tn"] = tn
-                    model_comparison_df["precision"] = precision
-                    model_comparison_df["recall"] = recall
-                    model_comparison_df["fpr"] = fpr
-                    model_comparison_df["f1"] = f1
-                    model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
-                    
-                    output_table.append(model_comparison_df)
-                    pd.concat(output_table).to_csv(output_table_path)
+                        output_table.append(model_comparison_df)
+                        pd.concat(output_table).to_csv(output_table_path)
