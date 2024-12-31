@@ -326,6 +326,8 @@ for region_labels in [[0, 3, 4]]:
                     dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
                     dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
                 
+                y = ((dfa >= 1) * 1).where(dfa.notna(), np.nan)
+                
                 n_sites = dfn["location"].nunique()
                 if aggregation == "month":
                     L = np.tile(dfa.columns.days_in_month.values, (n_sites, 1))
@@ -372,7 +374,7 @@ for region_labels in [[0, 3, 4]]:
                     '''
                     r_scripts = dict(
                         BP=f'''
-                        umf <- unmarkedFrameOccu(y = (as.matrix(dfa) > 1) * 1, siteCovs=site_covs, obsCovs=obs_covs)
+                        umf <- unmarkedFrameOccu(y = as.matrix(y), siteCovs=site_covs, obsCovs=obs_covs)
                         beforetime = Sys.time()
                         mod = occu(
                             data = umf,
@@ -383,8 +385,7 @@ for region_labels in [[0, 3, 4]]:
                         aftertime = Sys.time()
                         ''',
                         BP_FP=f'''
-                        y <- (as.matrix(dfa) > 1) * 1
-                        umf <- unmarkedFrameOccuFP(y=y, site_covs, obs_covs, type=c(0,dim(y)[2],0))
+                        umf <- unmarkedFrameOccuFP(y=as.matrix(y), site_covs, obs_covs, type=c(0,dim(y)[2],0))
                         beforetime = Sys.time()
                         mod = occuFP(
                             data = umf,
@@ -434,6 +435,7 @@ for region_labels in [[0, 3, 4]]:
                                 try:
                                     with robjects.local_context() as rctx:
                                         rctx["dfa"] = py2r(dfa)
+                                        rctx["y"] = py2r(y)
                                         rctx["L"] = py2r(L)
                                         rctx["site_covs"] = py2r(site_covs)
                                         ro.r("obs_covs <- list()")
@@ -468,7 +470,7 @@ for region_labels in [[0, 3, 4]]:
                             elif implementation == "NumPyro":
                                 model_fn = dict(BP=partial(occu, false_positives_constant=False), BP_FP=partial(occu, false_positives_constant=True), COP=partial(occu, counting_occurences=True, false_positives_constant=True))[model]
                                 try:
-                                    obs = ((dfa > 0) * 1) if model != "COP" else dfa
+                                    obs = y if model != "COP" else dfa
                                     model_comparison_df, _ = run(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=obs, session_duration=L)
                                     model_comparison_df.index = dfa.index
                                     model_comparison_df["implementation"] = implementation
