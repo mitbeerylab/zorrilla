@@ -466,15 +466,15 @@ for region_labels in [[0, 3, 4]]:
                                 except Exception as e:
                                     print(f"Got exception: {e}")
                             elif implementation == "NumPyro":
-                                if model != "COP":
-                                    model_fn = dict(BP=partial(occu, false_positives=False), BP_FP=partial(occu, false_positives=True), COP=None)[model]
-                                    try:
-                                        model_comparison_df = run(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=(dfa > 0) * 1)
-                                        model_comparison_df.index = dfa.index
-                                        model_comparison_df["implementation"] = implementation
-                                    except Exception as e:
-                                        print(f"Got exception: {e}")
-                                        pass
+                                model_fn = dict(BP=partial(occu, false_positives_constant=False), BP_FP=partial(occu, false_positives_constant=True), COP=partial(occu, counting_occurences=True, false_positives_constant=True))[model]
+                                try:
+                                    obs = ((dfa > 0) * 1) if model != "COP" else dfa
+                                    model_comparison_df, _ = run(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=obs, session_duration=L)
+                                    model_comparison_df.index = dfa.index
+                                    model_comparison_df["implementation"] = implementation
+                                except Exception as e:
+                                    print(f"Got exception: {e}")
+                                    pass
                         else:
                             naive_occupancy = (dfa > 0).any(axis=1).mean()
 
