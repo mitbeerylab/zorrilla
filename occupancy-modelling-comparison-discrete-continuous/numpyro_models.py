@@ -86,7 +86,7 @@ def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional
                 l_det = jnp.clip(l_det, min=0)
 
                 with numpyro.handlers.mask(mask=jnp.isfinite(obs)):
-                    y = numpyro.sample(f'y', dist.Poisson(l_det), obs=jnp.nan_to_num(obs))
+                    y = numpyro.sample(f'y', dist.Poisson(session_duration * l_det), obs=jnp.nan_to_num(obs))
 
 
     # Estimate proportion of occupied sites
@@ -234,7 +234,7 @@ def test_occu_cop():
         # According to the Royle model in unmarked, false positives are generated only if the site is unoccupied
         # Note this is different than how we think about false positives being a random occurrence per image.
         # For now, this is generating positive/negative per time period, which is different than per image.
-        dfa[i, :] = rng.poisson(lam=(obs_reg[i, :] * z[i] + rate_fp * (1 - z[i])), size=time_periods)
+        dfa[i, :] = rng.poisson(lam=(session_duration * obs_reg[i, :] * z[i] + rate_fp * (1 - z[i])), size=time_periods)
 
     obs = dfa
 
