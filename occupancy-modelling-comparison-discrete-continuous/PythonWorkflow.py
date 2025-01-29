@@ -28,6 +28,7 @@ from collections import defaultdict
 from numpyro_models import occu, run
 
 
+random_seed = 42
 tf = TimezoneFinder()
 timezone_at = cache(tf.timezone_at)
 
@@ -55,7 +56,26 @@ def get_thresholds(target_species_scores, n_sweep_steps):
     return np.linspace(np.min(target_species_scores[valid_mask]), np.max(target_species_scores[valid_mask]), n_sweep_steps)
     # return np.percentile(target_species_scores[valid_mask], np.linspace(0, 100, n_sweep_steps))
 
-output_table_path = os.path.join("data", "iwildcam_2022_results_v10.csv")
+output_table_path = os.path.join("data", "iwildcam_2022_results_v11.csv")
+
+
+def mcmc_get_results(samples, original_index):
+    results_df = pd.DataFrame(dict(
+        Predicted=samples["psi"].mean(axis=0),
+        DetectionProb=samples["prob_detection"].mean(axis=(0, 1)) if "prob_detection" in samples else None,
+        DetectionRate=samples["rate_detection"].mean(axis=(0, 1)) if "rate_detection" in samples else None,
+        FPProb=samples["prob_fp_constant"].mean() if "prob_fp_constant" in samples else None,
+        FPUnoccupiedProb=samples["prob_fp_unoccupied"].mean() if "prob_fp_unoccupied" in samples else None,
+
+        cov_state_intercept = samples["beta_0"].mean(),
+        cov_state_intercept_se = samples["beta_0"].std(),
+        cov_det_intercept = samples["alpha_0"].mean(),
+        cov_det_intercept_se = samples["alpha_0"].std(),
+        **{f'{k}': samples[k].mean() for k in samples.keys() if k.startswith("cov_")},
+        **{f'{k}_se': samples[k].std() for k in samples.keys() if k.startswith("cov_")},
+    ), index=original_index)
+
+    return results_df
 
 
 
@@ -132,6 +152,7 @@ print(f"number of sites overall: {dfn['location'].nunique()}")
 # print(f"number of observations: {Counter(dfo['observed'].tolist())}")
 
 pred_prefix = "logit_"  # "pred_" or "logit_"
+cal_prefix = "cal_"
 n_sweep_steps = 11
 calibration_min_samples = 10
 filter_topn = True
@@ -161,7 +182,16 @@ for target_species in target_species_list:
 
 # split along sequence IDs
 train_seq, test_seq = train_test_split(dfn["seq_id"].unique(), test_size=0.8, random_state=42)
-df_train, df_test = dfn[dfn["seq_id"].isin(train_seq)], dfn[dfn["seq_id"].isin(test_seq)]
+df_train, df_test = dfn[dfn["seq_id"].isin(train_seq)].copy(), dfn[dfn["seq_id"].isin(test_seq)].copy()
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
+
+for target_species in target_species_list:
+    classifier = CalibratedClassifierCV(LogisticRegression(random_state=random_seed))
+    train_finite_idx = np.isfinite(df_train[f"{pred_prefix}{target_species}"])
+    classifier.fit(df_train[f"{pred_prefix}{target_species}"][train_finite_idx].to_numpy()[:, None], df_train[f"gt_{target_species}"][train_finite_idx].to_numpy())
+    df_test[f"{cal_prefix}{target_species}"] = classifier.predict_proba(np.nan_to_num(df_test[f"{pred_prefix}{target_species}"].to_numpy(), neginf=-1e6)[:, None])[:, 1]
 
 if os.path.exists("cache/optimal_thresholds.json") and os.path.exists("cache/threshold_fp_calibration.json"):
     with open("cache/optimal_thresholds.json") as f:
@@ -269,29 +299,32 @@ for region_labels in [[0, 3, 4]]:
     for target_species in region_species:
         target_species_gt_col = f"gt_{target_species}"
         target_species_score_col = f"{pred_prefix}{target_species}"
+        target_species_prob_col = f"{cal_prefix}{target_species}"
         target_species_scores = dfn[target_species_score_col]
         valid_mask = ~np.isnan(target_species_scores)
         if np.sum(valid_mask) < n_sweep_steps:
             print(f"Species '{target_species}' has to few samples, skipping...")
             continue
-        thresholds = [float("NaN")] + [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
-        threshold_types = ["gt"] + ["topn"] +["calibrated"] + ["sampled"] * (len(thresholds) - 2)
+        thresholds = [float("NaN")] + [float("NaN")] + [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
+        threshold_types = ["gt"] + ["topn"]+ ["probabilistic"] + ["calibrated"] + ["sampled"] * (len(thresholds) - 2)
         if gt_only:
             thresholds, threshold_types = thresholds[0:1], threshold_types[0:1]
         gt_state_df = {}
         for threshold, threshold_type in zip(thresholds, threshold_types):
-            if threshold_type != "gt":
-                dfn["observed"] = dfn[target_species_score_col] >= threshold
-            else:
+            if threshold_type == "gt":
                 dfn["observed"] = dfn[target_species_gt_col]
+            elif threshold_type == "probabilistic":
+                dfn["observed"] = dfn[target_species_prob_col]
+            else:
+                dfn["observed"] = dfn[target_species_score_col] >= threshold                
 
             print(dfn["observed"].sum(), f"positive observations with threshold {threshold}")
 
 
-            tp = ( dfn["observed"] &  dfn[target_species_gt_col]).sum()
-            fp = ( dfn["observed"] & ~dfn[target_species_gt_col]).sum()
-            fn = (~dfn["observed"] &  dfn[target_species_gt_col]).sum()
-            tn = (~dfn["observed"] & ~dfn[target_species_gt_col]).sum()
+            tp = ( (dfn["observed"] >= 0.5) &  dfn[target_species_gt_col]).sum()
+            fp = ( (dfn["observed"] >= 0.5) & ~dfn[target_species_gt_col]).sum()
+            fn = (~(dfn["observed"] >= 0.5) &  dfn[target_species_gt_col]).sum()
+            tn = (~(dfn["observed"] >= 0.5) & ~dfn[target_species_gt_col]).sum()
 
             recall = tp / (tp + fn)
             precision = tp / (tp + fp)
@@ -322,6 +355,9 @@ for region_labels in [[0, 3, 4]]:
                             except IndexError:
                                 thres = float("inf")
                             dfa.iloc[i, j] = (np.array(dfa.iloc[i, j]) >= thres).sum().item()
+                elif threshold_type == "probabilistic":
+                    dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).max(numeric_only=True).reset_index()
+                    dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
                 else:
                     dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
                     dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")

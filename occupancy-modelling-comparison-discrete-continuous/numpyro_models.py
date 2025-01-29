@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from numpyro.infer import MCMC, DiscreteHMCGibbs, NUTS
+from numpyro.infer import MCMC, NUTS
 
 
 def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional[np.ndarray] = None, false_positives_constant: bool = False, false_positives_unoccupied: bool = False, counting_occurences: bool = False, obs: Optional[np.ndarray] = None):
@@ -61,18 +61,23 @@ def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional
     beta = jnp.array([numpyro.sample(f'beta_{i}', dist.Normal()) for i in range(n_site_covs + 1)])
     alpha = jnp.array([numpyro.sample(f'alpha_{i}', dist.Normal()) for i in range(n_obs_covs + 1)])
 
-    with numpyro.plate('site', n_sites, dim=-2):
+    # Transpose in order to fit NumPyro's plate structure
+    site_covs = site_covs.transpose((1, 0))
+    obs_covs = obs_covs.transpose((2, 1, 0))
+    obs = obs.transpose((1, 0))
+
+    with numpyro.plate('site', n_sites, dim=-1) as site:
 
         # Occupancy process
-        psi = numpyro.deterministic('psi', jax.nn.sigmoid(beta[0] + jnp.sum(jnp.array([beta[i + 1] * site_covs[..., i] for i in range(n_site_covs)]), axis=0)))
-        z = numpyro.sample('z', dist.Bernoulli(psi[:, None]))
+        psi = numpyro.deterministic('psi', jax.nn.sigmoid(jnp.tile(beta[0], (n_sites,)) + jnp.sum(jnp.array([beta[i + 1] * site_covs[i, ...] for i in range(n_site_covs)]), axis=0)))
+        z = numpyro.sample('z', dist.Bernoulli(probs=psi[site]), infer={'enumerate': 'parallel'})
 
-        with numpyro.plate('time_periods', time_periods, dim=-1):
+        with numpyro.plate('time_periods', time_periods, dim=-2):
 
             if not counting_occurences:
 
                 # Detection process
-                prob_detection = numpyro.deterministic(f'prob_detection', jax.nn.sigmoid(alpha[0] + jnp.sum(jnp.array([alpha[i + 1] * obs_covs[..., i] for i in range(n_obs_covs)]), axis=0)))
+                prob_detection = numpyro.deterministic(f'prob_detection', jax.nn.sigmoid(jnp.tile(alpha[0], (time_periods, n_sites)) + jnp.sum(jnp.array([alpha[i + 1] * obs_covs[i, ...] for i in range(n_obs_covs)]), axis=0)))
                 p_det = z * prob_detection + (1 - z) * prob_fp_unoccupied + prob_fp_constant
                 p_det = jnp.clip(p_det, min=0, max=1)
 
@@ -81,7 +86,7 @@ def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional
             else:
 
                 # Detection process
-                rate_detection = numpyro.deterministic(f'rate_detection', jax.nn.relu(alpha[0] + jnp.sum(jnp.array([alpha[i + 1] * obs_covs[..., i] for i in range(n_obs_covs)]), axis=0)))
+                rate_detection = numpyro.deterministic(f'rate_detection', jax.nn.relu(jnp.tile(alpha[0], (time_periods, n_sites)) + jnp.sum(jnp.array([alpha[i + 1] * obs_covs[i, ...] for i in range(n_obs_covs)]), axis=0)))
                 l_det = z * rate_detection + (1 - z) * rate_fp_unoccupied + rate_fp_constant
                 l_det = jnp.clip(l_det, min=0)
 
@@ -94,10 +99,9 @@ def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional
     PropOcc = numpyro.deterministic('PropOcc', NOcc / n_sites)
 
 
-def run(model_fn, site_covs, obs_covs, obs, session_duration=None, num_samples=1000, num_warmup=500, random_seed=0, **kwargs):
+def run(model_fn, site_covs, obs_covs, obs=None, session_duration=None, num_samples=1000, num_warmup=1000, random_seed=0, num_chains=5, **kwargs):
     nuts_kernel = NUTS(model_fn)
-    gibbs_kernel = DiscreteHMCGibbs(nuts_kernel, modified=True)
-    mcmc = MCMC(gibbs_kernel, num_samples=num_samples, num_warmup=num_warmup)
+    mcmc = MCMC(nuts_kernel, num_samples=num_samples, num_warmup=num_warmup, num_chains=num_chains, chain_method='parallel' if num_chains <= jax.local_device_count() else 'sequential')
 
     # convert dataframes to numpy arrays
     original_index = None
@@ -129,8 +133,8 @@ def run(model_fn, site_covs, obs_covs, obs, session_duration=None, num_samples=1
     
     results_df = pd.DataFrame(dict(
         Predicted=samples["psi"].mean(axis=0),
-        DetectionProb=samples["prob_detection"].mean(axis=(0, -1)) if "prob_detection" in samples else None,
-        DetectionRate=samples["rate_detection"].mean(axis=(0, -1)) if "rate_detection" in samples else None,
+        DetectionProb=samples["prob_detection"].mean(axis=(0, 1)) if "prob_detection" in samples else None,
+        DetectionRate=samples["rate_detection"].mean(axis=(0, 1)) if "rate_detection" in samples else None,
         FPProb=samples["prob_fp_constant"].mean() if "prob_fp_constant" in samples else None,
         FPUnoccupiedProb=samples["prob_fp_unoccupied"].mean() if "prob_fp_unoccupied" in samples else None,
 
