@@ -99,7 +99,7 @@ def occu(site_covs: np.ndarray, obs_covs: np.ndarray, session_duration: Optional
     PropOcc = numpyro.deterministic('PropOcc', NOcc / n_sites)
 
 
-def run(model_fn, site_covs, obs_covs, obs=None, session_duration=None, num_samples=1000, num_warmup=1000, random_seed=0, num_chains=5, **kwargs):
+def run(model_fn, site_covs, obs_covs, obs=None, session_duration=None, num_samples=1000, num_warmup=1000, random_seed=0, num_chains=1, **kwargs):
     nuts_kernel = NUTS(model_fn)
     mcmc = MCMC(nuts_kernel, num_samples=num_samples, num_warmup=num_warmup, num_chains=num_chains, chain_method='parallel' if num_chains <= jax.local_device_count() else 'sequential')
 

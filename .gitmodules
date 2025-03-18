@@ -1,3 +1,6 @@
 [submodule "data/computo-deeplearning-occupany-lynx"]
 	path = data/computo-deeplearning-occupany-lynx
 	url = https://github.com/oliviergimenez/computo-deeplearning-occupany-lynx
+[submodule "cameratrapai"]
+	path = cameratrapai
+	url = git@github.com:google/cameratrapai.git

@@ -25,8 +25,10 @@ from multiprocessing import Process, Queue, Event
 import json
 from functools import cache, partial
 from collections import defaultdict
-from numpyro_models import occu, run
-
+from biolith.models import occu, occu_cop, occu_cs, occu_rn
+from biolith.utils import fit
+from numpyro.diagnostics import hpdi
+from utils import uniform_sample_by_column
 
 random_seed = 42
 tf = TimezoneFinder()
@@ -56,23 +58,45 @@ def get_thresholds(target_species_scores, n_sweep_steps):
     return np.linspace(np.min(target_species_scores[valid_mask]), np.max(target_species_scores[valid_mask]), n_sweep_steps)
     # return np.percentile(target_species_scores[valid_mask], np.linspace(0, 100, n_sweep_steps))
 
-output_table_path = os.path.join("data", "iwildcam_2022_results_v11.csv")
 
 
-def mcmc_get_results(samples, original_index):
+def mcmc_get_results(results, original_index, confidence_level=0.95):
+    samples = results.samples
+    PredictionKey = "psi" if "psi" in samples else ("abundance" if "abundance" in samples else None)
+    try:
+        num_divergences = results.mcmc.get_extra_fields()["diverging"].sum().item()
+    except:
+        num_divergences = float("nan")
     results_df = pd.DataFrame(dict(
-        Predicted=samples["psi"].mean(axis=0),
+        Predicted=samples[PredictionKey].mean(axis=0),
         DetectionProb=samples["prob_detection"].mean(axis=(0, 1)) if "prob_detection" in samples else None,
         DetectionRate=samples["rate_detection"].mean(axis=(0, 1)) if "rate_detection" in samples else None,
+        Abundance=samples["abundance"].mean(axis=(0)) if "abundance" in samples else None,
         FPProb=samples["prob_fp_constant"].mean() if "prob_fp_constant" in samples else None,
         FPUnoccupiedProb=samples["prob_fp_unoccupied"].mean() if "prob_fp_unoccupied" in samples else None,
 
-        cov_state_intercept = samples["beta_0"].mean(),
-        cov_state_intercept_se = samples["beta_0"].std(),
-        cov_det_intercept = samples["alpha_0"].mean(),
-        cov_det_intercept_se = samples["alpha_0"].std(),
+        PredictedHPDILower=hpdi(samples[PredictionKey], confidence_level)[0],
+        PredictedHPDIUpper=hpdi(samples[PredictionKey], confidence_level)[1],
+
+        DetectionProbHPDILower=hpdi(samples["prob_detection"].reshape(-1, samples["prob_detection"].shape[-1]), confidence_level)[0] if "prob_detection" in samples else None,
+        DetectionProbHPDIUpper=hpdi(samples["prob_detection"].reshape(-1, samples["prob_detection"].shape[-1]), confidence_level)[1] if "prob_detection" in samples else None,
+
+        DetectionRateHPDILower=hpdi(samples["rate_detection"].reshape(-1, samples["rate_detection"].shape[-1]), confidence_level)[0] if "rate_detection" in samples else None,
+        DetectionRateHPDIUpper=hpdi(samples["rate_detection"].reshape(-1, samples["rate_detection"].shape[-1]), confidence_level)[1] if "rate_detection" in samples else None,
+
+        AbundanceHPDILower=hpdi(samples["abundance"], confidence_level)[0] if "abundance" in samples else None,
+        AbundanceHPDIUpper=hpdi(samples["abundance"], confidence_level)[1] if "abundance" in samples else None,
+
+        FPProbHPDILower=hpdi(samples["prob_fp_constant"], confidence_level)[0] if "prob_fp_constant" in samples else None,
+        FPProbHPDIUpper=hpdi(samples["prob_fp_constant"], confidence_level)[1] if "prob_fp_constant" in samples else None,
+
+        FPUnoccupiedProbHPDILower=hpdi(samples["prob_fp_unoccupied"], confidence_level)[0] if "prob_fp_unoccupied" in samples else None,
+        FPUnoccupiedProbHPDIUpper=hpdi(samples["prob_fp_unoccupied"], confidence_level)[1] if "prob_fp_unoccupied" in samples else None,
+
         **{f'{k}': samples[k].mean() for k in samples.keys() if k.startswith("cov_")},
         **{f'{k}_se': samples[k].std() for k in samples.keys() if k.startswith("cov_")},
+
+        num_divergences=num_divergences,
     ), index=original_index)
 
     return results_df
@@ -81,8 +105,18 @@ def mcmc_get_results(samples, original_index):
 
 os.chdir(os.path.dirname(__file__))  # TODO: remove
 
+classifier = "bioclip"
+# classifier = "cameratrapai"
+
+output_table_path = os.path.join("data", f"iwildcam_2022_results_v16_{classifier}.csv")
+
 # dfo = rdata.read_rda(os.path.join("data", "metadata_Ain.RData"))["allfiles"]
-dfn = pd.read_csv(os.path.join("..", "data", "iwildcam_2022_crops_bioclip_inference_logits_v3.csv"))
+dfn_path = dict(
+    bioclip=os.path.join("..", "data", "iwildcam_2022_crops_bioclip_inference_logits_v3.csv"),
+    cameratrapai=os.path.join("..", "data", "iwildcam_2022_cameratrapai_pt_train.csv"),
+)
+# dfn = pd.read_csv()
+dfn = pd.read_csv(dfn_path[classifier])
 
 # parse datetimes and filter out rows missing datetimes
 dfn["datetime"] = pd.to_datetime(dfn["datetime"])
@@ -162,8 +196,8 @@ filter_topn_rank = 3
 target_species_list = [e.replace(" ", "_") for e in [
     "tayassu pecari",
     "meleagris ocellata",
-    "equus quagga",
-    "madoqua guentheri",
+    # "equus quagga",
+    # "madoqua guentheri",
     "leopardus pardalis",
     # "giraffa camelopardalis",
     # "sus scrofa",
@@ -188,16 +222,16 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 
 for target_species in target_species_list:
-    classifier = CalibratedClassifierCV(LogisticRegression(random_state=random_seed))
+    calibrated_classifier = CalibratedClassifierCV(LogisticRegression(random_state=random_seed))
     train_finite_idx = np.isfinite(df_train[f"{pred_prefix}{target_species}"])
-    classifier.fit(df_train[f"{pred_prefix}{target_species}"][train_finite_idx].to_numpy()[:, None], df_train[f"gt_{target_species}"][train_finite_idx].to_numpy())
-    df_test[f"{cal_prefix}{target_species}"] = classifier.predict_proba(np.nan_to_num(df_test[f"{pred_prefix}{target_species}"].to_numpy(), neginf=-1e6)[:, None])[:, 1]
+    calibrated_classifier.fit(df_train[f"{pred_prefix}{target_species}"][train_finite_idx].to_numpy()[:, None], df_train[f"gt_{target_species}"][train_finite_idx].to_numpy())
+    df_test[f"{cal_prefix}{target_species}"] = calibrated_classifier.predict_proba(np.nan_to_num(df_test[f"{pred_prefix}{target_species}"].to_numpy(), neginf=-1e6)[:, None])[:, 1]
 
-if os.path.exists("cache/optimal_thresholds.json") and os.path.exists("cache/threshold_fp_calibration.json"):
-    with open("cache/optimal_thresholds.json") as f:
+if os.path.exists(f"cache/optimal_thresholds_{classifier}.json") and os.path.exists(f"cache/threshold_fp_calibration_{classifier}.json"):
+    with open(f"cache/optimal_thresholds_{classifier}.json") as f:
         best_threshold = json.load(f)
         assert set(best_threshold.keys()) == set(target_species_list)
-    with open("cache/threshold_fp_calibration.json") as f:
+    with open(f"cache/threshold_fp_calibration_{classifier}.json") as f:
         threshold_fp_calibration = json.load(f)
         assert set(threshold_fp_calibration.keys()) == set(target_species_list)
 else:
@@ -234,9 +268,9 @@ else:
         best_threshold[target_species] = best_score
     
     os.makedirs("cache", exist_ok=True)
-    with open("cache/optimal_thresholds.json", "w") as f:
+    with open(f"cache/optimal_thresholds_{classifier}.json", "w") as f:
         json.dump(best_threshold, f)
-    with open("cache/threshold_fp_calibration.json", "w") as f:
+    with open(f"cache/threshold_fp_calibration_{classifier}.json", "w") as f:
         json.dump(threshold_fp_calibration, f)
 
 # TODO: re-enable
@@ -252,7 +286,7 @@ for region_labels in [[0, 3, 4]]:
     output_table = []
 
 
-    if not os.path.exists("figures/scores"):
+    if not os.path.exists(f"figures/scores_{classifier}"):
         for target_species in target_species_list:
             fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(16, 4))
             target_species_scores = dfn[f"{pred_prefix}{target_species}"]
@@ -292,8 +326,8 @@ for region_labels in [[0, 3, 4]]:
             ax4.set_xlabel("Logit")
             ax4.set_ylabel("Recall")
             fig.suptitle(target_species)
-            os.makedirs("figures/scores", exist_ok=True)
-            plt.savefig(f"figures/scores/{target_species}.pdf", bbox_inches="tight", transparent=True)
+            os.makedirs(f"figures/scores_{classifier}", exist_ok=True)
+            plt.savefig(f"figures/scores_{classifier}/{target_species}.pdf", bbox_inches="tight", transparent=True)
 
     region_species = [species for species in target_species_list if dfn[f"gt_{species}"].sum() > 0]
     for target_species in region_species:
@@ -306,7 +340,7 @@ for region_labels in [[0, 3, 4]]:
             print(f"Species '{target_species}' has to few samples, skipping...")
             continue
         thresholds = [float("NaN")] + [float("NaN")] + [float("NaN")] + [best_threshold[target_species]] + [*get_thresholds(target_species_scores, n_sweep_steps)]
-        threshold_types = ["gt"] + ["topn"]+ ["probabilistic"] + ["calibrated"] + ["sampled"] * (len(thresholds) - 2)
+        threshold_types = ["gt"] + ["topn"] + ["calibrated"] + ["sampled"] * (len(thresholds) - 2)  # TODO: re-add "probabilistic"?
         if gt_only:
             thresholds, threshold_types = thresholds[0:1], threshold_types[0:1]
         gt_state_df = {}
@@ -362,6 +396,11 @@ for region_labels in [[0, 3, 4]]:
                     dfa = dfn[["datetime", "location", "observed"]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).sum(numeric_only=True).reset_index()
                     dfa = dfa.pivot(columns="datetime", index="location", values="observed").sort_values(by="location")
                 
+                # compute score data for continuous score model
+                dfs = dfn[["datetime", "location", target_species_score_col]].groupby([pd.Grouper(key="datetime", freq=pd_freq), "location"]).apply(lambda x: np.max(x[target_species_score_col])).reset_index()
+                dfs = dfs.pivot(columns="datetime", index="location").sort_values(by="location")
+                dfs.columns = dfs.columns.get_level_values(1)
+
                 y = ((dfa >= 1) * 1).where(dfa.notna(), np.nan)
                 
                 n_sites = dfn["location"].nunique()
@@ -453,21 +492,36 @@ for region_labels in [[0, 3, 4]]:
                         )
                         aftertime = Sys.time()
                         ''',
+                        RN=f'''
+                        umf <- unmarkedFrameOccu(y = as.matrix(y), siteCovs=site_covs, obsCovs=obs_covs)
+                        beforetime = Sys.time()
+                        mod = occuRN(
+                            data = umf,
+                            formula = ~ {" + ".join(obs_covs_list)} ~ {" + ".join(site_covs_list)},
+                            # starts = c(qlogis(psi_init), qlogis(p_init), 0, 0),
+                            method="Nelder-Mead",
+                            K=25,
+                        )
+                        aftertime = Sys.time()
+                        ''',
                     )
 
                     naive_occupancy = float("NaN")
                     naive_detection_probability = float("NaN")
                     naive_false_positive_rate = float("NaN")
-                    for model in ["NAIVE", "BP", "BP_FP", "COP"]:
+                   
+                    for model in ["NAIVE", "BP", "BP_FP", "COP", "CS", "RN"]:
                         print(f"Fitting model '{model}'")
                         parameter_names = {
                             "state": defaultdict(lambda: "state", { "COP": "psi" })[model],
                             "det": defaultdict(lambda: "det", { "COP": "lambda" })[model],
                         }
-                        model_comparison_df = pd.DataFrame([{}] * n_sites)
+                        model_comparison_df = pd.DataFrame([{}] * n_sites, index=dfa.index)
                         fitting_time_elapsed = float("NaN")
                         if model != "NAIVE":
                             if implementation == "R":
+                                if model == "CS":
+                                    continue
                                 try:
                                     with robjects.local_context() as rctx:
                                         rctx["dfa"] = py2r(dfa)
@@ -489,6 +543,7 @@ for region_labels in [[0, 3, 4]]:
                                         success = not ro.r["is.null"](ro.r("mod"))[0]
                                         if success:
                                             model_comparison_df = r2py(ro.r(f"predict(mod, '{parameter_names['state']}')"))
+                                            model_comparison_df.index = dfa.index
                                             try:
                                                 model_comparison_df["FPProb"] = r2py(ro.r(f"predict(mod, type = 'fp')"))["Predicted"]
                                             except:
@@ -497,19 +552,29 @@ for region_labels in [[0, 3, 4]]:
                                                 for cov_name, cov_value, cov_se in zip(r2py(ro.r(f"names(mod@estimates['{parameter_names[cov_type]}']@estimates)")), r2py(ro.r(f"mod@estimates['{parameter_names[cov_type]}']@estimates")), r2py(ro.r(f"SE(mod@estimates['{parameter_names[cov_type]}'])"))):
                                                     model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}"] = cov_value
                                                     model_comparison_df[f"cov_{cov_type}_{cov_name.replace('(Intercept)', 'intercept')}_se"] = cov_value
-                                            model_comparison_df.index = model_comparison_df.index.rename("Site")
-                                            model_comparison_df = model_comparison_df.reset_index()
                                             assert len(model_comparison_df) == n_sites
-                                            model_comparison_df["implementation"] = implementation
+                                            model_comparison_df["sucess"] = True
                                 except Exception as e:
                                     print(f"Got exception: {e}")
                             elif implementation == "NumPyro":
-                                model_fn = dict(BP=partial(occu, false_positives_constant=False), BP_FP=partial(occu, false_positives_constant=True), COP=partial(occu, counting_occurences=True, false_positives_constant=True))[model]
+                                model_fn = dict(
+                                    BP=partial(occu, false_positives_constant=False),
+                                    BP_FP=partial(occu, false_positives_constant=True),
+                                    COP=partial(occu_cop, false_positives_constant=True, session_duration=L),
+                                    CS=partial(occu_cs),
+                                    RN=partial(occu_rn, false_positives_constant=True, max_abundance=25),
+                                )[model]
+                                obs = dict(
+                                    BP=y,
+                                    BP_FP=y,
+                                    COP=dfa,
+                                    CS=dfs,
+                                    RN=y,
+                                )[model]
                                 try:
-                                    obs = y if model != "COP" else dfa
-                                    model_comparison_df, _ = run(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=obs, session_duration=L)
-                                    model_comparison_df.index = dfa.index
-                                    model_comparison_df["implementation"] = implementation
+                                    results = fit(model_fn, site_covs[site_covs_list], obs_covs[obs_covs_list], obs=obs, num_samples=500, num_warmup=500, num_chains=3)
+                                    model_comparison_df = mcmc_get_results(results, obs.index)
+                                    model_comparison_df["sucess"] = True
                                 except Exception as e:
                                     print(f"Got exception: {e}")
                                     pass
@@ -526,7 +591,9 @@ for region_labels in [[0, 3, 4]]:
                             
                             naive_false_positive_rate = np.interp(threshold, threshold_fp_calibration[target_species]["threshold"], threshold_fp_calibration[target_species]["fpr"])
                             model_comparison_df = pd.DataFrame([{ "Predicted": naive_occupancy }] * n_sites, index=dfa.index)
+                            model_comparison_df["sucess"] = True
 
+                        model_comparison_df["implementation"] = implementation
                         model_comparison_df["Discretisation"] = aggregation.title()
                         model_comparison_df["Model"] = model
                         model_comparison_df["species"] = target_species
@@ -541,6 +608,7 @@ for region_labels in [[0, 3, 4]]:
                         model_comparison_df["fpr"] = fpr
                         model_comparison_df["f1"] = f1
                         model_comparison_df["fitting_time_elapsed"] = fitting_time_elapsed
+                        model_comparison_df["sucess"] = "sucess" in model_comparison_df and model_comparison_df["sucess"]
                         
                         output_table.append(model_comparison_df)
                         pd.concat(output_table).to_csv(output_table_path)
